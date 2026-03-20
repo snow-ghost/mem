@@ -1,38 +1,65 @@
-# mem - Persistent Memory for AI Coding Agents
+# mem — Persistent Memory for AI Coding Agents
 
 `mem` gives your AI coding agent long-term memory. It captures what happened across sessions, extracts reusable principles, builds a library of proven procedures, and feeds relevant context back at the start of each new session.
 
+Works with **Claude Code**, **OpenCode**, and **Codex** out of the box. Auto-detected, no wrappers needed.
+
 Three types of memory, all stored as human-readable files:
 
-- **Episodic** (`episodes.jsonl`) - significant events: decisions, bugs, patterns, insights, rollbacks
-- **Semantic** (`principles.md`) - extracted rules grouped by topic
-- **Procedural** (`skills/*.md`) - step-by-step recipes for recurring tasks
+- **Episodic** (`episodes.jsonl`) — significant events: decisions, bugs, patterns, insights, rollbacks
+- **Semantic** (`principles.md`) — extracted rules grouped by topic
+- **Procedural** (`skills/*.md`) — step-by-step recipes for recurring tasks
 
 ## Install
 
-Requires Go 1.21+ and at least one supported AI coding agent CLI:
+### Pre-built binaries (recommended)
 
-| Backend | Binary | Install |
-|---------|--------|---------|
-| Claude Code | `claude` | [docs.anthropic.com](https://docs.anthropic.com/en/docs/claude-code) |
-| OpenCode | `opencode` | [opencode.ai](https://opencode.ai) |
-| Codex (OpenAI) | `codex` | [developers.openai.com/codex](https://developers.openai.com/codex/cli) |
+Download from [GitHub Releases](https://github.com/snow-ghost/mem/releases/latest):
 
-`mem` auto-detects which one is installed. No configuration needed.
+```bash
+# macOS (Apple Silicon)
+curl -fsSL https://github.com/snow-ghost/mem/releases/latest/download/mem-darwin-arm64.tar.gz | tar xz
+sudo mv mem-darwin-arm64 /usr/local/bin/mem
+
+# macOS (Intel)
+curl -fsSL https://github.com/snow-ghost/mem/releases/latest/download/mem-darwin-amd64.tar.gz | tar xz
+sudo mv mem-darwin-amd64 /usr/local/bin/mem
+
+# Linux (x86_64)
+curl -fsSL https://github.com/snow-ghost/mem/releases/latest/download/mem-linux-amd64.tar.gz | tar xz
+sudo mv mem-linux-amd64 /usr/local/bin/mem
+
+# Linux (ARM64)
+curl -fsSL https://github.com/snow-ghost/mem/releases/latest/download/mem-linux-arm64.tar.gz | tar xz
+sudo mv mem-linux-arm64 /usr/local/bin/mem
+```
+
+### Via Go
 
 ```bash
 go install github.com/snow-ghost/mem/cmd/mem@latest
 ```
 
-Or build from source:
+### From source
 
 ```bash
 git clone https://github.com/snow-ghost/mem.git
 cd mem
 go build -o mem ./cmd/mem
-# move to somewhere on your PATH
-mv mem /usr/local/bin/
+sudo mv mem /usr/local/bin/
 ```
+
+### Requirements
+
+At least one supported AI coding agent:
+
+| Backend | Binary | Install |
+|---------|--------|---------|
+| Claude Code | `claude` | [docs.anthropic.com](https://docs.anthropic.com/en/docs/claude-code) |
+| OpenCode | `opencode` | [opencode.ai](https://opencode.ai) |
+| Codex (OpenAI) | `codex` | [developers.openai.com](https://developers.openai.com/codex/cli) |
+
+`mem` auto-detects which one is installed. No configuration needed.
 
 ## Quick Start
 
@@ -58,7 +85,9 @@ This creates a `.memory/` directory:
 
 ### 2. Set up automatic extraction
 
-Add to your Claude Code `settings.json` (printed by `mem init`):
+#### Claude Code
+
+Add to your Claude Code `settings.json`:
 
 ```json
 {
@@ -73,7 +102,25 @@ Add to your Claude Code `settings.json` (printed by `mem init`):
 }
 ```
 
-Now every time a Claude Code session ends, `mem` automatically captures significant events.
+#### OpenCode
+
+Copy the plugin to your project:
+
+```bash
+mkdir -p .opencode/plugins
+curl -fsSL https://raw.githubusercontent.com/snow-ghost/mem/main/.opencode/plugins/mem.ts \
+  -o .opencode/plugins/mem.ts
+```
+
+The plugin automatically injects memory context at session start and extracts events when the session goes idle.
+
+#### Codex / Other agents
+
+Run after each session manually or via your agent's hook system:
+
+```bash
+mem extract
+```
 
 ### 3. Check what's stored
 
@@ -88,6 +135,7 @@ Memory Store: /home/user/project/.memory
   Skills:         1
   Session count:  4 / 10 (next consolidation at 10)
   Store size:     4820 bytes
+  Backend:        claude (auto-detected)
 ```
 
 ### 4. Consolidate when prompted
@@ -106,13 +154,7 @@ This groups similar episodes into principles, creates skill files for repeated p
 mem inject
 ```
 
-Outputs relevant memory (principles, recent events, matching skills) for the agent to read at session start. Add to your `CLAUDE.md`:
-
-```markdown
-# Project Memory
-
-At the start of each session, read the output of `mem inject` for project context.
-```
+Outputs relevant memory (principles, recent events, matching skills) for the agent to read at session start.
 
 ## Commands
 
@@ -126,16 +168,17 @@ mem init [--path <dir>]
 
 ### `mem extract`
 
-Captures significant events from the last session. Invokes Claude (Haiku by default) to analyze the git diff and identify decisions, errors, patterns, insights, and rollbacks.
+Captures significant events from the last session. Invokes the configured backend to analyze the git diff and identify decisions, errors, patterns, insights, and rollbacks.
 
 ```bash
-mem extract [--session <id>] [--model <model>] [--dry-run]
+mem extract [--session <id>] [--model <model>] [--backend <name>] [--dry-run]
 ```
 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--session` | git short hash | Session identifier |
-| `--model` | `haiku` | Claude model for analysis |
+| `--model` | `haiku` | LLM model for analysis |
+| `--backend` | auto-detect | Backend: `claude`, `opencode`, `codex`, `custom` |
 | `--dry-run` | `false` | Print episodes without writing |
 
 ### `mem consolidate`
@@ -143,12 +186,13 @@ mem extract [--session <id>] [--model <model>] [--dry-run]
 Analyzes accumulated episodes, extracts principles, detects skill candidates, and cleans up the store.
 
 ```bash
-mem consolidate [--model <model>] [--dry-run] [--force]
+mem consolidate [--model <model>] [--backend <name>] [--dry-run] [--force]
 ```
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--model` | `sonnet` | Claude model for analysis |
+| `--model` | `sonnet` | LLM model for analysis |
+| `--backend` | auto-detect | Backend override |
 | `--dry-run` | `false` | Show changes without applying |
 | `--force` | `false` | Run even if thresholds not reached |
 
@@ -156,7 +200,7 @@ Exits with code 3 if thresholds are not met (use `--force` to override).
 
 ### `mem inject`
 
-Assembles relevant memory context for a new session. No LLM call - pure file assembly.
+Assembles relevant memory context for a new session. No LLM call — pure file assembly.
 
 ```bash
 mem inject [--episodes <n>] [--format <fmt>]
@@ -171,29 +215,27 @@ Skills are matched against recent episode tags. If no skills match, all skills a
 
 ### `mem status`
 
-Shows memory store statistics.
+Shows memory store statistics, including detected backend.
 
 ```bash
-mem status [--json]
+mem status [--json] [--backend <name>]
 ```
 
 All commands accept `--path <dir>` to override the default `.memory` location.
-
-All LLM commands (`extract`, `consolidate`) accept `--backend <name>` to override the backend for that command.
 
 ## Multi-Backend Support
 
 `mem` works with multiple AI coding agents out of the box:
 
-| Backend | Binary | Invocation Pattern | Model Support |
-|---------|--------|--------------------|---------------|
-| Claude Code | `claude` | `claude -p "<prompt>" --model <model>` | Yes |
-| OpenCode | `opencode` | `opencode -p "<prompt>" -q` | No (uses provider default) |
-| Codex | `codex` | `codex exec "<prompt>" -m <model>` | Yes |
+| Backend | Binary | Invocation Pattern | Model Flag |
+|---------|--------|--------------------|------------|
+| Claude Code | `claude` | `claude -p "<prompt>" --model <model>` | Supported |
+| OpenCode | `opencode` | `opencode run "<prompt>"` | Not passed (uses provider default) |
+| Codex | `codex` | `codex exec "<prompt>" -m <model>` | Supported |
 
 ### Backend Selection
 
-1. **Auto-detect** (default): `mem` checks which CLI is installed in order: claude > opencode > codex
+1. **Auto-detect** (default): checks which CLI is installed in order: `claude` > `opencode` > `codex`
 2. **Environment variable**: `export MEM_BACKEND=opencode`
 3. **Per-command flag**: `mem extract --backend codex`
 
@@ -210,18 +252,11 @@ export MEM_BACKEND_ARGS="-p {prompt} --model {model}"
 mem extract
 ```
 
-`{prompt}` and `{model}` are replaced with actual values. If `{model}` is omitted from the template, the `--model` flag is silently ignored.
-
-### Check Active Backend
-
-```bash
-mem status
-# Output includes: Backend: claude (auto-detected)
-```
+`{prompt}` and `{model}` are replaced with actual values. If `{model}` is absent from the template, the `--model` flag is silently ignored.
 
 ## Configuration
 
-All settings are configured via environment variables:
+All settings via environment variables:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
@@ -242,7 +277,7 @@ All settings are configured via environment variables:
 
 1. Reads the latest `git diff`
 2. Reads the last 20 episodes and current principles for context
-3. Sends everything to Claude (Haiku) with a prompt asking to identify significant events
+3. Sends everything to the configured backend with a prompt asking to identify significant events
 4. Deduplicates against existing episodes (exact match on type + summary)
 5. Appends new episodes to `episodes.jsonl` under file lock
 6. Increments the session counter and checks consolidation thresholds
@@ -250,7 +285,7 @@ All settings are configured via environment variables:
 ### Consolidation (periodic)
 
 1. Reads all episodes, principles, and skill list
-2. Sends to Claude (Sonnet) for analysis and synthesis
+2. Sends to the configured backend for analysis and synthesis
 3. Merges new principles, deduplicates, enforces the 100-principle limit
 4. Removes flagged episodes, enforces the 200-episode limit (newest 50 protected)
 5. Creates skill files for procedures detected 3+ times
@@ -264,6 +299,8 @@ All settings are configured via environment variables:
 2. Reads the N most recent episodes
 3. Loads all skills, matches against recent episode tags
 4. Outputs formatted context (Markdown or JSON) to stdout
+
+No LLM call — injection is a local file operation.
 
 ## Multi-Agent Support
 
@@ -285,8 +322,8 @@ MEM_AGENT_ID=agent-b mem extract
 
 The LLM prompts used for extraction and consolidation are stored in `.memory/prompts/`. Edit them to tune what counts as a "significant event" or how principles are extracted:
 
-- `.memory/prompts/extract.md` - extraction prompt
-- `.memory/prompts/consolidate.md` - consolidation prompt
+- `.memory/prompts/extract.md` — extraction prompt
+- `.memory/prompts/consolidate.md` — consolidation prompt
 
 If deleted, the built-in defaults are used.
 
@@ -308,11 +345,11 @@ One JSON object per line:
 # Project Principles
 
 ## Architecture
-- Use JSONL for append-only logs - simpler git diffs, no driver dependency
+- Use JSONL for append-only logs — simpler git diffs, no driver dependency
 - Memory files must stay under 150 lines
 
 ## Testing
-- Always use file locks for concurrent writes - prevents race conditions
+- Always use file locks for concurrent writes — prevents race conditions
 ```
 
 ### skills/{slug}.md
@@ -345,17 +382,12 @@ One JSON object per line:
 ## Development
 
 ```bash
-# Run tests
-go test -race -shuffle=on ./...
-
-# Build
-go build -o mem ./cmd/mem
-
-# Lint
-go vet ./...
+go test -race -shuffle=on ./...    # 87 tests
+go build -o mem ./cmd/mem          # build
+go vet ./...                       # lint
 ```
 
-Zero external dependencies - stdlib only.
+Zero external dependencies — stdlib only.
 
 ## License
 
