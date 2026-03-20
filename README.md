@@ -10,7 +10,15 @@ Three types of memory, all stored as human-readable files:
 
 ## Install
 
-Requires Go 1.21+ and [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) (`claude`).
+Requires Go 1.21+ and at least one supported AI coding agent CLI:
+
+| Backend | Binary | Install |
+|---------|--------|---------|
+| Claude Code | `claude` | [docs.anthropic.com](https://docs.anthropic.com/en/docs/claude-code) |
+| OpenCode | `opencode` | [opencode.ai](https://opencode.ai) |
+| Codex (OpenAI) | `codex` | [developers.openai.com/codex](https://developers.openai.com/codex/cli) |
+
+`mem` auto-detects which one is installed. No configuration needed.
 
 ```bash
 go install github.com/snow-ghost/mem/cmd/mem@latest
@@ -171,12 +179,55 @@ mem status [--json]
 
 All commands accept `--path <dir>` to override the default `.memory` location.
 
+All LLM commands (`extract`, `consolidate`) accept `--backend <name>` to override the backend for that command.
+
+## Multi-Backend Support
+
+`mem` works with multiple AI coding agents out of the box:
+
+| Backend | Binary | Invocation Pattern | Model Support |
+|---------|--------|--------------------|---------------|
+| Claude Code | `claude` | `claude -p "<prompt>" --model <model>` | Yes |
+| OpenCode | `opencode` | `opencode -p "<prompt>" -q` | No (uses provider default) |
+| Codex | `codex` | `codex exec "<prompt>" -m <model>` | Yes |
+
+### Backend Selection
+
+1. **Auto-detect** (default): `mem` checks which CLI is installed in order: claude > opencode > codex
+2. **Environment variable**: `export MEM_BACKEND=opencode`
+3. **Per-command flag**: `mem extract --backend codex`
+
+Priority: `--backend` flag > `MEM_BACKEND` env > auto-detect.
+
+### Custom Backend
+
+Use any CLI tool that accepts a prompt and returns text:
+
+```bash
+export MEM_BACKEND=custom
+export MEM_BACKEND_BINARY=/path/to/my-agent
+export MEM_BACKEND_ARGS="-p {prompt} --model {model}"
+mem extract
+```
+
+`{prompt}` and `{model}` are replaced with actual values. If `{model}` is omitted from the template, the `--model` flag is silently ignored.
+
+### Check Active Backend
+
+```bash
+mem status
+# Output includes: Backend: claude (auto-detected)
+```
+
 ## Configuration
 
 All settings are configured via environment variables:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
+| `MEM_BACKEND` | (auto-detect) | Backend: `claude`, `opencode`, `codex`, `custom` |
+| `MEM_BACKEND_BINARY` | | Binary path for custom backend |
+| `MEM_BACKEND_ARGS` | `{prompt}` | Argument template for custom backend |
 | `MEM_PATH` | `.memory` | Memory store directory |
 | `MEM_SESSION_THRESHOLD` | `10` | Sessions before consolidation is recommended |
 | `MEM_EPISODE_THRESHOLD` | `100` | Episodes before consolidation is recommended |

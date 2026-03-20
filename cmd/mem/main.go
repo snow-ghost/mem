@@ -56,24 +56,18 @@ Commands:
   status       Show memory store statistics`)
 }
 
-func resolveStore(args []string) (*store.MemoryStore, config.Config) {
+func runInit(args []string) int {
 	cfg := config.Load()
 	var pathFlag string
-	fs := flag.NewFlagSet("", flag.ContinueOnError)
+	fs := flag.NewFlagSet("init", flag.ContinueOnError)
 	fs.StringVar(&pathFlag, "path", "", "override memory store path")
 	fs.Parse(args)
 	if pathFlag != "" {
 		cfg.MemPath = pathFlag
 	}
-	absPath, err := filepath.Abs(cfg.MemPath)
-	if err != nil {
-		absPath = cfg.MemPath
-	}
-	return store.New(absPath), cfg
-}
+	absPath, _ := filepath.Abs(cfg.MemPath)
+	s := store.New(absPath)
 
-func runInit(args []string) int {
-	s, _ := resolveStore(args)
 	if err := s.Init(); err != nil {
 		fmt.Fprintf(os.Stderr, "mem: init: %v\n", err)
 		return 1
@@ -81,24 +75,21 @@ func runInit(args []string) int {
 	fmt.Printf("Initialized memory store at %s\n", s.Root)
 	fmt.Println("Created: episodes.jsonl, principles.md, skills/, consolidation-log.md, prompts/")
 	fmt.Println()
-	fmt.Println("To enable automatic extraction after each Claude Code session, add to settings.json:")
-	fmt.Println(`  {`)
-	fmt.Println(`    "hooks": {`)
-	fmt.Println(`      "PostToolUse": [{`)
-	fmt.Printf(`        "matcher": "Stop",`+"\n")
-	fmt.Printf(`        "command": "mem extract"`+"\n")
-	fmt.Println(`      }]`)
-	fmt.Println(`    }`)
-	fmt.Println(`  }`)
+	fmt.Println("To enable automatic extraction after each session, add a hook to your agent's config:")
+	fmt.Println(`  command: "mem extract"`)
+	fmt.Println()
+	fmt.Println("Supported backends: claude, opencode, codex (auto-detected)")
+	fmt.Println("Set MEM_BACKEND to choose explicitly, or mem will auto-detect.")
 	return 0
 }
 
 func runStatus(args []string) int {
 	var jsonFlag bool
-	var pathFlag string
+	var pathFlag, backendFlag string
 	fs := flag.NewFlagSet("status", flag.ContinueOnError)
 	fs.BoolVar(&jsonFlag, "json", false, "output as JSON")
 	fs.StringVar(&pathFlag, "path", "", "override memory store path")
+	fs.StringVar(&backendFlag, "backend", "", "override backend")
 	fs.Parse(args)
 
 	cfg := config.Load()
@@ -129,8 +120,14 @@ func runStatus(args []string) int {
 
 	sessCount, _ := s.ReadSessionCount()
 	storeSize, _ := s.StoreSize()
-
 	lastEntry, _ := consolidation.ReadLast(s.ConsolidationLogPath())
+
+	backendName := "(none)"
+	backendSource := ""
+	if b, err := agent.Resolve(cfg, backendFlag); err == nil {
+		backendName = b.Name
+		backendSource = b.Source
+	}
 
 	if jsonFlag {
 		out := map[string]any{
@@ -141,6 +138,7 @@ func runStatus(args []string) int {
 			"session_count":      map[string]any{"current": sessCount, "threshold": cfg.SessionThreshold},
 			"last_consolidation": lastEntry.Date,
 			"store_size_bytes":   storeSize,
+			"backend":            map[string]any{"name": backendName, "source": backendSource},
 		}
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
@@ -157,18 +155,21 @@ func runStatus(args []string) int {
 		fmt.Printf("  Last consolidation: %s\n", lastEntry.Date)
 	}
 	fmt.Printf("  Store size:     %d bytes\n", storeSize)
+	if backendSource != "" {
+		fmt.Printf("  Backend:        %s (%s)\n", backendName, backendSource)
+	}
 	return 0
 }
 
 func runExtract(args []string) int {
-	var sessionFlag, modelFlag string
+	var sessionFlag, modelFlag, pathFlag, backendFlag string
 	var dryRunFlag bool
-	var pathFlag string
 	fs := flag.NewFlagSet("extract", flag.ContinueOnError)
 	fs.StringVar(&sessionFlag, "session", "", "session ID")
-	fs.StringVar(&modelFlag, "model", "haiku", "Claude model")
+	fs.StringVar(&modelFlag, "model", "haiku", "LLM model")
 	fs.BoolVar(&dryRunFlag, "dry-run", false, "print without writing")
 	fs.StringVar(&pathFlag, "path", "", "override memory store path")
+	fs.StringVar(&backendFlag, "backend", "", "override backend (claude, opencode, codex, custom)")
 	fs.Parse(args)
 
 	cfg := config.Load()
@@ -182,7 +183,13 @@ func runExtract(args []string) int {
 		sessionFlag = runner.GetGitShortHash()
 	}
 
-	inv := &agent.CLIInvoker{}
+	backend, err := agent.Resolve(cfg, backendFlag)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "mem: extract: %v\n", err)
+		return 1
+	}
+	inv := agent.NewInvoker(backend)
+
 	result, err := runner.RunExtract(cfg, s, inv, sessionFlag, modelFlag, dryRunFlag)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "mem: extract: %v\n", err)
@@ -210,13 +217,14 @@ func runExtract(args []string) int {
 }
 
 func runConsolidate(args []string) int {
-	var modelFlag, pathFlag string
+	var modelFlag, pathFlag, backendFlag string
 	var dryRunFlag, forceFlag bool
 	fs := flag.NewFlagSet("consolidate", flag.ContinueOnError)
-	fs.StringVar(&modelFlag, "model", "sonnet", "Claude model")
+	fs.StringVar(&modelFlag, "model", "sonnet", "LLM model")
 	fs.BoolVar(&dryRunFlag, "dry-run", false, "show proposed changes without applying")
 	fs.BoolVar(&forceFlag, "force", false, "run even if thresholds not reached")
 	fs.StringVar(&pathFlag, "path", "", "override memory store path")
+	fs.StringVar(&backendFlag, "backend", "", "override backend (claude, opencode, codex, custom)")
 	fs.Parse(args)
 
 	cfg := config.Load()
@@ -226,7 +234,13 @@ func runConsolidate(args []string) int {
 	absPath, _ := filepath.Abs(cfg.MemPath)
 	s := store.New(absPath)
 
-	inv := &agent.CLIInvoker{}
+	backend, err := agent.Resolve(cfg, backendFlag)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "mem: consolidate: %v\n", err)
+		return 1
+	}
+	inv := agent.NewInvoker(backend)
+
 	result, err := runner.RunConsolidate(cfg, s, inv, modelFlag, dryRunFlag, forceFlag)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "mem: consolidate: %v\n", err)

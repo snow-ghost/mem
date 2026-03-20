@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bytes"
 	"fmt"
 	"os/exec"
 )
@@ -10,20 +11,43 @@ type Invoker interface {
 }
 
 type CLIInvoker struct {
+	backend *Backend
+
+	// Legacy field — kept for backward compatibility in tests.
+	// If backend is nil, falls back to this binary with claude args.
 	Binary string
 }
 
 func (c *CLIInvoker) Invoke(model, prompt string) (string, error) {
-	binary := c.Binary
-	if binary == "" {
-		binary = "claude"
+	var binary string
+	var args []string
+
+	if c.backend != nil {
+		binary = c.backend.Binary
+		args = c.backend.BuildArgs(prompt, model)
+	} else {
+		binary = c.Binary
+		if binary == "" {
+			binary = "claude"
+		}
+		args = []string{"-p", prompt, "--model", model}
 	}
-	cmd := exec.Command(binary, "-p", prompt, "--model", model)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return "", fmt.Errorf("claude %s: %w\n%s", model, err, string(out))
+
+	cmd := exec.Command(binary, args...)
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		errMsg := stderr.String()
+		if errMsg != "" {
+			return "", fmt.Errorf("%s: %w\n%s", binary, err, errMsg)
+		}
+		return "", fmt.Errorf("%s: %w", binary, err)
 	}
-	return string(out), nil
+
+	return stdout.String(), nil
 }
 
 type StubInvoker struct {
