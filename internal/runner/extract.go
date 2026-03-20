@@ -115,7 +115,7 @@ func RunExtract(cfg config.Config, s *store.MemoryStore, inv agent.Invoker, sess
 }
 
 func parseExtractResponse(response string) ([]episode.Episode, error) {
-	response = strings.TrimSpace(response)
+	response = stripANSI(strings.TrimSpace(response))
 
 	start := strings.Index(response, "[")
 	end := strings.LastIndex(response, "]")

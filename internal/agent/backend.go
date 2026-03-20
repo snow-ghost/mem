@@ -30,7 +30,7 @@ var builtinBackends = []Backend{
 		Binary:        "opencode",
 		SupportsModel: false,
 		BuildArgs: func(prompt, _ string) []string {
-			return []string{"-p", prompt, "-q"}
+			return []string{"run", prompt}
 		},
 	},
 	{

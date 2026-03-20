@@ -193,7 +193,7 @@ func RunConsolidate(cfg config.Config, s *store.MemoryStore, inv agent.Invoker, 
 }
 
 func parseConsolidateResponse(response string) (*consolidateResponse, error) {
-	response = strings.TrimSpace(response)
+	response = stripANSI(strings.TrimSpace(response))
 	start := strings.Index(response, "{")
 	end := strings.LastIndex(response, "}")
 	if start == -1 || end == -1 || end <= start {

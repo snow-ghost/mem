@@ -17,13 +17,8 @@ func TestClaudeBackend_GivenPromptAndModel_WhenBuildArgs_ThenCorrectArgs(t *test
 func TestOpenCodeBackend_GivenPromptAndModel_WhenBuildArgs_ThenModelIgnored(t *testing.T) {
 	b := builtinBackends[1] // opencode
 	args := b.BuildArgs("hello", "haiku")
-	want := []string{"-p", "hello", "-q"}
+	want := []string{"run", "hello"}
 	assertArgs(t, args, want)
-	for _, a := range args {
-		if a == "haiku" {
-			t.Error("model 'haiku' should not appear in opencode args")
-		}
-	}
 }
 
 func TestCodexBackend_GivenPromptAndModel_WhenBuildArgs_ThenExecSubcommand(t *testing.T) {
