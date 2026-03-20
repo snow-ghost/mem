@@ -14,6 +14,9 @@ type Config struct {
 	EpisodesMax      int
 	EpisodesKeep     int
 	AgentID          string
+	Backend          string
+	BackendBinary    string
+	BackendArgs      string
 }
 
 func Load() Config {
@@ -29,6 +32,9 @@ func Load() Config {
 		EpisodesMax:      envIntOrDefault("MEM_EPISODES_MAX", 200),
 		EpisodesKeep:     envIntOrDefault("MEM_EPISODES_KEEP", 50),
 		AgentID:          agentID,
+		Backend:          os.Getenv("MEM_BACKEND"),
+		BackendBinary:    os.Getenv("MEM_BACKEND_BINARY"),
+		BackendArgs:      os.Getenv("MEM_BACKEND_ARGS"),
 	}
 }
 

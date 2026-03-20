@@ -62,12 +62,46 @@ func TestLoad_GivenInvalidInt_WhenLoaded_ThenDefaultUsed(t *testing.T) {
 	}
 }
 
+func TestLoad_GivenBackendEnv_WhenLoaded_ThenBackendSet(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("MEM_BACKEND", "opencode")
+	cfg := Load()
+	if cfg.Backend != "opencode" {
+		t.Errorf("Backend = %q, want %q", cfg.Backend, "opencode")
+	}
+}
+
+func TestLoad_GivenNoBackend_WhenLoaded_ThenBackendEmpty(t *testing.T) {
+	clearEnv(t)
+	cfg := Load()
+	if cfg.Backend != "" {
+		t.Errorf("Backend = %q, want empty", cfg.Backend)
+	}
+}
+
+func TestLoad_GivenCustomBackend_WhenLoaded_ThenAllFieldsPopulated(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("MEM_BACKEND", "custom")
+	t.Setenv("MEM_BACKEND_BINARY", "my-agent")
+	t.Setenv("MEM_BACKEND_ARGS", "-p {prompt}")
+	cfg := Load()
+	if cfg.Backend != "custom" {
+		t.Errorf("Backend = %q, want %q", cfg.Backend, "custom")
+	}
+	if cfg.BackendBinary != "my-agent" {
+		t.Errorf("BackendBinary = %q, want %q", cfg.BackendBinary, "my-agent")
+	}
+	if cfg.BackendArgs != "-p {prompt}" {
+		t.Errorf("BackendArgs = %q, want %q", cfg.BackendArgs, "-p {prompt}")
+	}
+}
+
 func clearEnv(t *testing.T) {
 	t.Helper()
 	for _, key := range []string{
 		"MEM_PATH", "MEM_SESSION_THRESHOLD", "MEM_EPISODE_THRESHOLD",
 		"MEM_PRINCIPLES_MAX", "MEM_EPISODES_MAX", "MEM_EPISODES_KEEP",
-		"MEM_AGENT_ID",
+		"MEM_AGENT_ID", "MEM_BACKEND", "MEM_BACKEND_BINARY", "MEM_BACKEND_ARGS",
 	} {
 		if v, ok := os.LookupEnv(key); ok {
 			t.Setenv(key, v) // will restore after test
