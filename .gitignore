@@ -1,0 +1,9 @@
+*.exe
+*.test
+*.out
+mem
+.memory/
+.DS_Store
+Thumbs.db
+*.tmp
+*.swp
