@@ -2,6 +2,7 @@
 *.test
 *.out
 mem
+!cmd/mem
 .memory/
 .DS_Store
 Thumbs.db
