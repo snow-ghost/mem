@@ -51,6 +51,40 @@ func (s *MemoryStore) Init() error {
 	return nil
 }
 
+// EnsureInit creates the store if it doesn't exist, or creates only
+// missing files if the root dir exists. Never overwrites existing files.
+// Returns (true, nil) if the store was freshly created.
+func (s *MemoryStore) EnsureInit() (bool, error) {
+	created := false
+	if _, err := os.Stat(s.Root); os.IsNotExist(err) {
+		created = true
+	}
+
+	dirs := []string{s.Root, s.SkillsDir(), s.PromptsDir()}
+	for _, d := range dirs {
+		if err := os.MkdirAll(d, 0755); err != nil {
+			return false, fmt.Errorf("create directory %s: %w", d, err)
+		}
+	}
+
+	defaults := map[string]string{
+		s.EpisodesPath():          "",
+		s.PrinciplesPath():        "# Project Principles\n",
+		s.ConsolidationLogPath():  "# Consolidation Log\n",
+		s.ExtractPromptPath():     DefaultExtractPrompt,
+		s.ConsolidatePromptPath(): DefaultConsolidatePrompt,
+	}
+	for path, content := range defaults {
+		if _, err := os.Stat(path); os.IsNotExist(err) {
+			if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+				return false, fmt.Errorf("create file %s: %w", path, err)
+			}
+		}
+	}
+
+	return created, nil
+}
+
 func (s *MemoryStore) EpisodesPath() string          { return filepath.Join(s.Root, "episodes.jsonl") }
 func (s *MemoryStore) PrinciplesPath() string         { return filepath.Join(s.Root, "principles.md") }
 func (s *MemoryStore) ConsolidationLogPath() string   { return filepath.Join(s.Root, "consolidation-log.md") }

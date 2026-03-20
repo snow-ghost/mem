@@ -1,0 +1,10 @@
+.git/
+.memory/
+.opencode/
+.specify/
+specs/
+*.md
+!go.mod
+Dockerfile
+.dockerignore
+.gitignore
