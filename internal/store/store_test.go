@@ -45,6 +45,82 @@ func TestInit_GivenAlreadyInitialized_WhenInitCalled_ThenError(t *testing.T) {
 	}
 }
 
+func TestEnsureInit_GivenNoMemoryDir_WhenCalled_ThenCreatedAndReturnsTrue(t *testing.T) {
+	dir := t.TempDir()
+	s := New(filepath.Join(dir, ".memory"))
+
+	created, err := s.EnsureInit()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !created {
+		t.Error("expected created=true for fresh directory")
+	}
+	for _, path := range []string{
+		s.EpisodesPath(), s.PrinciplesPath(), s.ConsolidationLogPath(),
+		s.ExtractPromptPath(), s.ConsolidatePromptPath(),
+	} {
+		if _, err := os.Stat(path); os.IsNotExist(err) {
+			t.Errorf("file not created: %s", path)
+		}
+	}
+}
+
+func TestEnsureInit_GivenExistingStore_WhenCalled_ThenReturnsFalseAndPreservesData(t *testing.T) {
+	dir := t.TempDir()
+	s := New(filepath.Join(dir, ".memory"))
+	s.Init()
+
+	os.WriteFile(s.EpisodesPath(), []byte(`{"test":"data"}`+"\n"), 0644)
+
+	created, err := s.EnsureInit()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if created {
+		t.Error("expected created=false for existing store")
+	}
+	data, _ := os.ReadFile(s.EpisodesPath())
+	if !strings.Contains(string(data), "test") {
+		t.Error("existing episodes.jsonl was overwritten")
+	}
+}
+
+func TestEnsureInit_GivenPartialStore_WhenCalled_ThenOnlyMissingCreated(t *testing.T) {
+	dir := t.TempDir()
+	s := New(filepath.Join(dir, ".memory"))
+	s.Init()
+
+	os.WriteFile(s.EpisodesPath(), []byte(`{"existing":"ep"}`+"\n"), 0644)
+	os.Remove(s.PrinciplesPath())
+
+	created, err := s.EnsureInit()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if created {
+		t.Error("expected created=false (root dir existed)")
+	}
+	if _, err := os.Stat(s.PrinciplesPath()); os.IsNotExist(err) {
+		t.Error("principles.md was not recreated")
+	}
+	data, _ := os.ReadFile(s.EpisodesPath())
+	if !strings.Contains(string(data), "existing") {
+		t.Error("episodes.jsonl was overwritten")
+	}
+}
+
+func TestEnsureInit_GivenIdempotent_WhenCalledTwice_ThenNoError(t *testing.T) {
+	dir := t.TempDir()
+	s := New(filepath.Join(dir, ".memory"))
+
+	s.EnsureInit()
+	_, err := s.EnsureInit()
+	if err != nil {
+		t.Fatalf("second EnsureInit should not error: %v", err)
+	}
+}
+
 func TestPaths_GivenInitializedStore_WhenResolved_ThenCorrect(t *testing.T) {
 	root := "/tmp/test-mem/.memory"
 	s := New(root)

@@ -56,6 +56,18 @@ Commands:
   status       Show memory store statistics`)
 }
 
+func ensureStore(s *store.MemoryStore) int {
+	created, err := s.EnsureInit()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "mem: %v\n", err)
+		return 1
+	}
+	if created {
+		fmt.Fprintf(os.Stderr, "mem: initialized memory store at %s\n", s.Root)
+	}
+	return 0
+}
+
 func runInit(args []string) int {
 	cfg := config.Load()
 	var pathFlag string
@@ -98,6 +110,9 @@ func runStatus(args []string) int {
 	}
 	absPath, _ := filepath.Abs(cfg.MemPath)
 	s := store.New(absPath)
+	if code := ensureStore(s); code != 0 {
+		return code
+	}
 
 	epCount, err := episode.Count(s.EpisodesPath())
 	if err != nil {
@@ -178,6 +193,9 @@ func runExtract(args []string) int {
 	}
 	absPath, _ := filepath.Abs(cfg.MemPath)
 	s := store.New(absPath)
+	if code := ensureStore(s); code != 0 {
+		return code
+	}
 
 	if sessionFlag == "" {
 		sessionFlag = runner.GetGitShortHash()
@@ -233,6 +251,9 @@ func runConsolidate(args []string) int {
 	}
 	absPath, _ := filepath.Abs(cfg.MemPath)
 	s := store.New(absPath)
+	if code := ensureStore(s); code != 0 {
+		return code
+	}
 
 	backend, err := agent.Resolve(cfg, backendFlag)
 	if err != nil {
@@ -285,6 +306,9 @@ func runInject(args []string) int {
 	}
 	absPath, _ := filepath.Abs(cfg.MemPath)
 	s := store.New(absPath)
+	if code := ensureStore(s); code != 0 {
+		return code
+	}
 
 	ctx, err := runner.RunInject(cfg, s, episodesFlag)
 	if err != nil {

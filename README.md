@@ -40,6 +40,19 @@ sudo mv mem-linux-arm64 /usr/local/bin/mem
 go install github.com/snow-ghost/mem/cmd/mem@latest
 ```
 
+### Docker
+
+```bash
+docker run --rm -v $(pwd):/project ghcr.io/snow-ghost/mem status
+```
+
+Or build locally:
+
+```bash
+docker build -t mem .
+docker run --rm -v $(pwd):/project mem status
+```
+
 ### From source
 
 ```bash
@@ -63,14 +76,16 @@ At least one supported AI coding agent:
 
 ## Quick Start
 
-### 1. Initialize in your project
+### 1. Start using mem
 
 ```bash
 cd your-project
-mem init
+mem status
 ```
 
-This creates a `.memory/` directory:
+That's it. The memory store is auto-initialized on first use — no `mem init` needed (though `mem init` still works for explicit setup).
+
+The `.memory/` directory:
 
 ```
 .memory/
