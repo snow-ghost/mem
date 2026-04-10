@@ -145,27 +145,45 @@ claude mcp add mem -- mem mcp
 
 ## Benchmarks
 
-Evaluated on **LongMemEval** (ICLR 2025), the standard long-term memory benchmark.
+Evaluated on three public memory benchmarks. See [`benchmarks/README.md`](benchmarks/README.md)
+for reproduction steps.
+
+### LongMemEval (ICLR 2025) — 500 questions, 6 question types
 
 | Metric | Value |
 |---|---|
-| Recall@1 | 45.6% |
 | **Recall@5** | **69.4%** |
 | Recall@10 | 78.4% |
-| Full run (500 questions) | **~31 seconds** |
+| Full run | ~31s |
 | Avg query latency | 7.1 ms |
 
-### Comparison
+Matches the published BM25 baseline (~70%), confirming correct implementation.
+Semantic-embedding systems (MemPalace at 96.6%, Mem0/Zep at ~85%) need a model
+in the loop; `mem` achieves this with pure BM25.
 
-| System | R@5 | Approach |
-|---|---|---|
-| MemPalace (ChromaDB embeddings) | 96.6% | Semantic vectors, Python |
-| Mem0 / Zep | ~85% | LLM extraction |
-| **mem (BM25, ours)** | **69.4%** | Pure Go, no LLM, no embeddings |
-| BM25 flat baseline (published) | ~70% | LongMemEval paper |
+### LoCoMo (Snap Research) — 10 long-form conversations, 1986 QAs
 
-Our score matches the published BM25 baseline, confirming the implementation is correct.
-See [`benchmarks/README.md`](benchmarks/README.md) for details and reproduction steps.
+| Metric | Value |
+|---|---|
+| Recall@1 | 60.0% |
+| **Recall@5** | **88.2%** |
+| Recall@10 | 93.7% |
+| Full run | ~11s |
+
+Per-category R@5: open-domain 92.7%, temporal 85.0%, single-hop 80.5%,
+multi-hop 59.4%. Non-adversarial R@5: 86.8%.
+
+### ConvoMem (Salesforce, arXiv 2511.10523) — 7,021 test cases, sizes 1–6
+
+| Metric | Value |
+|---|---|
+| Recall@1 | **100.0%** |
+| Recall@5 | **100.0%** |
+| Avg query latency | 1.4 ms |
+
+Confirms the ConvoMem paper's thesis: *"your first 150 conversations don't
+need RAG"*. BM25 alone is sufficient at small haystacks. The harder regime
+(50–300 conversations with value-change tracking) is left as future work.
 
 ## Architecture
 
@@ -180,7 +198,10 @@ internal/
   layers/              4-layer memory stack (L0 identity, L1 compression, wake-up)
   miner/               File and conversation mining (Claude JSONL, ChatGPT, Slack, plain text)
   mcp/                 MCP server with 8 tools
-benchmarks/            LongMemEval evaluation harness
+benchmarks/
+  longmemeval/         LongMemEval harness
+  locomo/              LoCoMo harness
+  convomem/            ConvoMem harness
 ```
 
 ## Dependencies
