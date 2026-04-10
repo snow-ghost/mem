@@ -1,0 +1,161 @@
+package search
+
+import (
+	"sort"
+
+	"github.com/snow-ghost/mem/internal/db"
+	"github.com/snow-ghost/mem/internal/embeddings"
+)
+
+// SearchVector scores every indexed drawer by cosine similarity against the
+// query vector. Returns the top `limit` results.
+//
+// This is a full scan — fine up to ~100k drawers on a modern CPU. For larger
+// palaces an ANN index (e.g., HNSW) would be needed.
+func SearchVector(d *db.DB, queryVec []float32, wingID, roomID int64, limit int) ([]SearchResult, error) {
+	if limit <= 0 {
+		limit = 5
+	}
+	if len(queryVec) == 0 {
+		return nil, nil
+	}
+
+	query := `SELECT d.id, d.content, d.wing_id, d.room_id, d.hall, d.source_file,
+		COALESCE(w.name, ''), COALESCE(rm.name, ''), d.embedding
+		FROM drawers d
+		LEFT JOIN wings w ON d.wing_id = w.id
+		LEFT JOIN rooms rm ON d.room_id = rm.id
+		WHERE d.embedding IS NOT NULL`
+	var args []any
+	if wingID > 0 {
+		query += " AND d.wing_id = ?"
+		args = append(args, wingID)
+	}
+	if roomID > 0 {
+		query += " AND d.room_id = ?"
+		args = append(args, roomID)
+	}
+
+	rows, err := d.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var results []SearchResult
+	for rows.Next() {
+		var sr SearchResult
+		var blob []byte
+		if err := rows.Scan(&sr.DrawerID, &sr.Content, &sr.WingID, &sr.RoomID,
+			&sr.Hall, &sr.SourceFile, &sr.WingName, &sr.RoomName, &blob); err != nil {
+			continue
+		}
+		vec, err := embeddings.Decode(blob)
+		if err != nil {
+			continue
+		}
+		sr.Score = float64(embeddings.Cosine(queryVec, vec))
+		results = append(results, sr)
+	}
+
+	sort.Slice(results, func(i, j int) bool { return results[i].Score > results[j].Score })
+	if len(results) > limit {
+		results = results[:limit]
+	}
+	return results, nil
+}
+
+// SearchHybrid combines BM25 and vector results using Reciprocal Rank Fusion
+// (RRF) with k=60 — the standard constant from the original RRF paper.
+//
+//	rrf(d) = sum_over_systems( 1 / (k + rank_in_system(d)) )
+//
+// Drawers missing from one system contribute 0 from that system. We widen the
+// per-system candidate pool to 4*limit to give RRF enough material to work with.
+func SearchHybrid(d *db.DB, query string, queryVec []float32, wingID, roomID int64, limit int) ([]SearchResult, error) {
+	if limit <= 0 {
+		limit = 5
+	}
+	pool := limit * 4
+	const k = 60.0
+
+	bm25Results, err := Search(d, query, wingID, roomID, pool)
+	if err != nil {
+		return nil, err
+	}
+	vecResults, err := SearchVector(d, queryVec, wingID, roomID, pool)
+	if err != nil {
+		return nil, err
+	}
+
+	fused := make(map[int64]*SearchResult)
+	for rank, r := range bm25Results {
+		copy := r
+		fused[r.DrawerID] = &copy
+		fused[r.DrawerID].Score = 1.0 / (k + float64(rank+1))
+	}
+	for rank, r := range vecResults {
+		score := 1.0 / (k + float64(rank+1))
+		if existing, ok := fused[r.DrawerID]; ok {
+			existing.Score += score
+		} else {
+			copy := r
+			copy.Score = score
+			fused[r.DrawerID] = &copy
+		}
+	}
+
+	out := make([]SearchResult, 0, len(fused))
+	for _, r := range fused {
+		out = append(out, *r)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Score > out[j].Score })
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
+// IndexEmbedding stores a precomputed embedding blob on a drawer.
+func IndexEmbedding(d *db.DB, drawerID int64, blob []byte) error {
+	_, err := d.Exec("UPDATE drawers SET embedding = ? WHERE id = ?", blob, drawerID)
+	return err
+}
+
+// CountDrawersWithEmbeddings returns how many drawers already have embeddings.
+func CountDrawersWithEmbeddings(d *db.DB) (int, error) {
+	var n int
+	err := d.QueryRow("SELECT COUNT(*) FROM drawers WHERE embedding IS NOT NULL").Scan(&n)
+	return n, err
+}
+
+type DrawerContent struct {
+	ID      int64
+	Content string
+}
+
+// ListDrawersWithoutEmbeddings returns drawer IDs and contents that still
+// need embedding. Caller should batch these through an embeddings client.
+func ListDrawersWithoutEmbeddings(d *db.DB, limit int) ([]DrawerContent, error) {
+	q := "SELECT id, content FROM drawers WHERE embedding IS NULL ORDER BY id"
+	var args []any
+	if limit > 0 {
+		q += " LIMIT ?"
+		args = append(args, limit)
+	}
+	rows, err := d.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []DrawerContent
+	for rows.Next() {
+		var item DrawerContent
+		if err := rows.Scan(&item.ID, &item.Content); err != nil {
+			return nil, err
+		}
+		out = append(out, item)
+	}
+	return out, nil
+}

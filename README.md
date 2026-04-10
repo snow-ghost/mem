@@ -79,6 +79,13 @@ mem kg invalidate Kai works_on Orion --ended 2026-03-01
 # Status overview
 mem status
 
+# Optional: semantic search with an OpenAI-compatible embeddings API
+export MEM_EMBEDDINGS_URL=https://api.openai.com/v1/embeddings
+export MEM_EMBEDDINGS_MODEL=text-embedding-3-small
+export MEM_EMBEDDINGS_API_KEY=sk-...
+mem reindex                            # compute embeddings for all drawers
+mem search "auth decision" --mode hybrid
+
 # Start MCP server (for Claude Code integration)
 mem mcp
 ```
@@ -103,7 +110,18 @@ Built-in **BM25 Okapi** implementation with our own inverted index:
 - Classic BM25 scoring (k1=1.5, b=0.75)
 - Filter by wing / room before scoring (for palace structure boost)
 
-No vector embeddings, no external services, no LLM calls.
+No vector embeddings required for the default mode — **everything works offline**.
+
+#### Optional: semantic embeddings (hybrid search)
+
+Set `MEM_EMBEDDINGS_URL` + `MEM_EMBEDDINGS_MODEL` (+ `MEM_EMBEDDINGS_API_KEY`)
+pointing at any OpenAI-compatible `/v1/embeddings` endpoint — OpenAI, Voyage AI,
+Cohere (compat mode), Together, Ollama, LM Studio, LocalAI, llama.cpp server.
+Then `mem reindex` computes and stores dense vectors, and `mem search --mode
+hybrid` fuses BM25 + cosine similarity via Reciprocal Rank Fusion (k=60). Pure
+vector search (`--mode vector`) is also available. Embeddings are stored as
+BLOBs in the same SQLite file — no second database. The entire feature is
+optional; unset vars = BM25-only behavior unchanged.
 
 ### Knowledge Graph
 
@@ -193,7 +211,8 @@ internal/
   config/              Configuration (env vars, paths)
   db/                  SQLite schema + connection
   palace/              Wings, rooms, drawers, tunnels
-  search/              BM25 tokenizer + indexer + search
+  search/              BM25 + vector + hybrid (RRF) search
+  embeddings/          Optional OpenAI-compatible client + blob serializer
   kg/                  Temporal knowledge graph + contradiction detection
   layers/              4-layer memory stack (L0 identity, L1 compression, wake-up)
   miner/               File and conversation mining (Claude JSONL, ChatGPT, Slack, plain text)

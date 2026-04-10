@@ -26,7 +26,8 @@ CREATE TABLE IF NOT EXISTS drawers (
     hall TEXT DEFAULT 'facts',
     source_file TEXT DEFAULT '',
     source_type TEXT DEFAULT 'file',
-    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    embedding BLOB
 );
 
 CREATE TABLE IF NOT EXISTS closets (
@@ -84,6 +85,14 @@ CREATE INDEX IF NOT EXISTS idx_search_term ON search_index(term_id);
 `
 
 func InitSchema(d *DB) error {
-	_, err := d.Exec(schema)
-	return err
+	if _, err := d.Exec(schema); err != nil {
+		return err
+	}
+	// Add embedding column to drawers if an old palace is missing it.
+	var count int
+	d.QueryRow("SELECT COUNT(*) FROM pragma_table_info('drawers') WHERE name='embedding'").Scan(&count)
+	if count == 0 {
+		d.Exec("ALTER TABLE drawers ADD COLUMN embedding BLOB")
+	}
+	return nil
 }

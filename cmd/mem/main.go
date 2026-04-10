@@ -11,6 +11,7 @@ import (
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/snow-ghost/mem/internal/config"
+	"github.com/snow-ghost/mem/internal/embeddings"
 	"github.com/snow-ghost/mem/internal/kg"
 	"github.com/snow-ghost/mem/internal/layers"
 	mcpserver "github.com/snow-ghost/mem/internal/mcp"
@@ -41,6 +42,8 @@ func main() {
 		os.Exit(runKG(os.Args[2:]))
 	case "mcp":
 		os.Exit(runMCP(os.Args[2:]))
+	case "reindex":
+		os.Exit(runReindex(os.Args[2:]))
 	default:
 		fmt.Fprintf(os.Stderr, "mem: unknown command %q\n", os.Args[1])
 		usage()
@@ -54,10 +57,11 @@ func usage() {
 Commands:
   init         Initialize memory palace
   mine         Ingest files into palace
-  search       Search memories
+  search       Search memories (--mode bm25|vector|hybrid)
   status       Palace overview
   wake-up      Load compact context for AI session
   kg           Knowledge graph operations
+  reindex      Compute embeddings for all drawers (requires MEM_EMBEDDINGS_*)
   mcp          Start MCP server`)
 }
 
@@ -225,11 +229,12 @@ func runMine(args []string) int {
 }
 
 func runSearch(args []string) int {
-	var wingFlag, roomFlag string
+	var wingFlag, roomFlag, modeFlag string
 	var limitFlag int
 	fs := flag.NewFlagSet("search", flag.ContinueOnError)
 	fs.StringVar(&wingFlag, "wing", "", "filter by wing")
 	fs.StringVar(&roomFlag, "room", "", "filter by room")
+	fs.StringVar(&modeFlag, "mode", "bm25", "search mode: bm25, vector, or hybrid")
 	fs.IntVar(&limitFlag, "limit", 5, "max results")
 	var palaceFlag string
 	fs.StringVar(&palaceFlag, "palace", "", "override palace path")
@@ -271,10 +276,34 @@ func runSearch(args []string) int {
 		roomID = r.ID
 	}
 
-	results, err := search.Search(d, query, wingID, roomID, limitFlag)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "mem: search: %v\n", err)
-		return 1
+	var results []search.SearchResult
+	switch modeFlag {
+	case "vector", "hybrid":
+		if !cfg.EmbeddingsEnabled() {
+			fmt.Fprintln(os.Stderr, "mem: search: MEM_EMBEDDINGS_URL and MEM_EMBEDDINGS_MODEL must be set for vector/hybrid mode")
+			return 1
+		}
+		client := embeddings.NewClient(cfg)
+		qvec, err := client.Embed(query)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "mem: search: embed query: %v\n", err)
+			return 1
+		}
+		if modeFlag == "vector" {
+			results, err = search.SearchVector(d, qvec, wingID, roomID, limitFlag)
+		} else {
+			results, err = search.SearchHybrid(d, query, qvec, wingID, roomID, limitFlag)
+		}
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "mem: search: %v\n", err)
+			return 1
+		}
+	default:
+		results, err = search.Search(d, query, wingID, roomID, limitFlag)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "mem: search: %v\n", err)
+			return 1
+		}
 	}
 
 	if len(results) == 0 {
@@ -476,6 +505,70 @@ func runKG(args []string) int {
 		fmt.Fprintf(os.Stderr, "mem: kg: unknown subcommand %q\n", subcmd)
 		return 1
 	}
+	return 0
+}
+
+func runReindex(args []string) int {
+	var palaceFlag string
+	var batchSize int
+	fs := flag.NewFlagSet("reindex", flag.ContinueOnError)
+	fs.StringVar(&palaceFlag, "palace", "", "override palace path")
+	fs.IntVar(&batchSize, "batch", 64, "embeddings batch size")
+	fs.Parse(args)
+
+	cfg := config.Load()
+	if palaceFlag != "" {
+		cfg.PalacePath = palaceFlag
+	}
+	if !cfg.EmbeddingsEnabled() {
+		fmt.Fprintln(os.Stderr, "mem: reindex: set MEM_EMBEDDINGS_URL and MEM_EMBEDDINGS_MODEL (optional MEM_EMBEDDINGS_API_KEY)")
+		return 1
+	}
+
+	d, err := palace.Init(cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "mem: reindex: %v\n", err)
+		return 1
+	}
+	defer d.Close()
+
+	client := embeddings.NewClient(cfg)
+	alreadyDone, _ := search.CountDrawersWithEmbeddings(d)
+
+	var embedded int
+	for {
+		pending, err := search.ListDrawersWithoutEmbeddings(d, batchSize)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "mem: reindex: list: %v\n", err)
+			return 1
+		}
+		if len(pending) == 0 {
+			break
+		}
+
+		texts := make([]string, len(pending))
+		for i, p := range pending {
+			texts[i] = p.Content
+		}
+		vecs, err := client.EmbedBatch(texts)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "mem: reindex: embed: %v\n", err)
+			return 1
+		}
+
+		for i, p := range pending {
+			blob := embeddings.Encode(vecs[i])
+			if err := search.IndexEmbedding(d, p.ID, blob); err != nil {
+				fmt.Fprintf(os.Stderr, "mem: reindex: store %d: %v\n", p.ID, err)
+				return 1
+			}
+			embedded++
+		}
+		fmt.Printf("  embedded %d drawers...\n", embedded)
+	}
+
+	fmt.Printf("Reindex complete: %d new embeddings (was %d, now %d)\n",
+		embedded, alreadyDone, alreadyDone+embedded)
 	return 0
 }
 
