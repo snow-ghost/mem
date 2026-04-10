@@ -2,110 +2,32 @@ package config
 
 import (
 	"os"
+	"strings"
 	"testing"
 )
 
-func TestLoad_GivenNoEnvVars_WhenLoaded_ThenDefaultsApplied(t *testing.T) {
-	clearEnv(t)
+func TestLoad_GivenNoEnv_WhenLoaded_ThenDefaultPath(t *testing.T) {
+	os.Unsetenv("MEM_PALACE")
 	cfg := Load()
-
-	if cfg.MemPath != ".memory" {
-		t.Errorf("MemPath = %q, want %q", cfg.MemPath, ".memory")
+	if !strings.HasSuffix(cfg.PalacePath, ".mempalace") {
+		t.Errorf("PalacePath = %q, want suffix .mempalace", cfg.PalacePath)
 	}
-	if cfg.SessionThreshold != 10 {
-		t.Errorf("SessionThreshold = %d, want 10", cfg.SessionThreshold)
-	}
-	if cfg.EpisodeThreshold != 100 {
-		t.Errorf("EpisodeThreshold = %d, want 100", cfg.EpisodeThreshold)
-	}
-	if cfg.PrinciplesMax != 100 {
-		t.Errorf("PrinciplesMax = %d, want 100", cfg.PrinciplesMax)
-	}
-	if cfg.EpisodesMax != 200 {
-		t.Errorf("EpisodesMax = %d, want 200", cfg.EpisodesMax)
-	}
-	if cfg.EpisodesKeep != 50 {
-		t.Errorf("EpisodesKeep = %d, want 50", cfg.EpisodesKeep)
-	}
-	if cfg.AgentID == "" {
-		t.Errorf("AgentID should be auto-generated, got empty")
+	if cfg.DbFile != "palace.db" {
+		t.Errorf("DbFile = %q, want palace.db", cfg.DbFile)
 	}
 }
 
-func TestLoad_GivenCustomThreshold_WhenLoaded_ThenOverrideApplied(t *testing.T) {
-	clearEnv(t)
-	t.Setenv("MEM_SESSION_THRESHOLD", "20")
+func TestLoad_GivenEnv_WhenLoaded_ThenCustomPath(t *testing.T) {
+	t.Setenv("MEM_PALACE", "/tmp/custom-palace")
 	cfg := Load()
-
-	if cfg.SessionThreshold != 20 {
-		t.Errorf("SessionThreshold = %d, want 20", cfg.SessionThreshold)
+	if cfg.PalacePath != "/tmp/custom-palace" {
+		t.Errorf("PalacePath = %q, want /tmp/custom-palace", cfg.PalacePath)
 	}
 }
 
-func TestLoad_GivenAgentID_WhenLoaded_ThenAgentIDSet(t *testing.T) {
-	clearEnv(t)
-	t.Setenv("MEM_AGENT_ID", "agent-1")
-	cfg := Load()
-
-	if cfg.AgentID != "agent-1" {
-		t.Errorf("AgentID = %q, want %q", cfg.AgentID, "agent-1")
-	}
-}
-
-func TestLoad_GivenInvalidInt_WhenLoaded_ThenDefaultUsed(t *testing.T) {
-	clearEnv(t)
-	t.Setenv("MEM_SESSION_THRESHOLD", "notanumber")
-	cfg := Load()
-
-	if cfg.SessionThreshold != 10 {
-		t.Errorf("SessionThreshold = %d, want 10 (default)", cfg.SessionThreshold)
-	}
-}
-
-func TestLoad_GivenBackendEnv_WhenLoaded_ThenBackendSet(t *testing.T) {
-	clearEnv(t)
-	t.Setenv("MEM_BACKEND", "opencode")
-	cfg := Load()
-	if cfg.Backend != "opencode" {
-		t.Errorf("Backend = %q, want %q", cfg.Backend, "opencode")
-	}
-}
-
-func TestLoad_GivenNoBackend_WhenLoaded_ThenBackendEmpty(t *testing.T) {
-	clearEnv(t)
-	cfg := Load()
-	if cfg.Backend != "" {
-		t.Errorf("Backend = %q, want empty", cfg.Backend)
-	}
-}
-
-func TestLoad_GivenCustomBackend_WhenLoaded_ThenAllFieldsPopulated(t *testing.T) {
-	clearEnv(t)
-	t.Setenv("MEM_BACKEND", "custom")
-	t.Setenv("MEM_BACKEND_BINARY", "my-agent")
-	t.Setenv("MEM_BACKEND_ARGS", "-p {prompt}")
-	cfg := Load()
-	if cfg.Backend != "custom" {
-		t.Errorf("Backend = %q, want %q", cfg.Backend, "custom")
-	}
-	if cfg.BackendBinary != "my-agent" {
-		t.Errorf("BackendBinary = %q, want %q", cfg.BackendBinary, "my-agent")
-	}
-	if cfg.BackendArgs != "-p {prompt}" {
-		t.Errorf("BackendArgs = %q, want %q", cfg.BackendArgs, "-p {prompt}")
-	}
-}
-
-func clearEnv(t *testing.T) {
-	t.Helper()
-	for _, key := range []string{
-		"MEM_PATH", "MEM_SESSION_THRESHOLD", "MEM_EPISODE_THRESHOLD",
-		"MEM_PRINCIPLES_MAX", "MEM_EPISODES_MAX", "MEM_EPISODES_KEEP",
-		"MEM_AGENT_ID", "MEM_BACKEND", "MEM_BACKEND_BINARY", "MEM_BACKEND_ARGS",
-	} {
-		if v, ok := os.LookupEnv(key); ok {
-			t.Setenv(key, v) // will restore after test
-		}
-		os.Unsetenv(key)
+func TestDbPath_GivenConfig_WhenCalled_ThenCorrectPath(t *testing.T) {
+	cfg := Config{PalacePath: "/tmp/palace", DbFile: "palace.db"}
+	if cfg.DbPath() != "/tmp/palace/palace.db" {
+		t.Errorf("DbPath = %q", cfg.DbPath())
 	}
 }

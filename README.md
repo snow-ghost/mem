@@ -1,40 +1,41 @@
-# mem — Persistent Memory for AI Coding Agents
+# mem — Standalone Memory Palace for AI Agents
 
-`mem` gives your AI coding agent long-term memory. It captures what happened across sessions, extracts reusable principles, builds a library of proven procedures, and feeds relevant context back at the start of each new session.
+A **pure Go** memory palace system inspired by [MemPalace](https://github.com/milla-jovovich/mempalace),
+rewritten from scratch with zero Python dependencies. Single static binary, single SQLite file,
+no LLM required for core features.
 
-Works with **Claude Code**, **OpenCode**, and **Codex** out of the box. Auto-detected, no wrappers needed.
+## What it is
 
-Three types of memory, all stored as human-readable files:
+`mem` organizes knowledge into a navigable palace structure:
 
-- **Episodic** (`episodes.jsonl`) — significant events: decisions, bugs, patterns, insights, rollbacks
-- **Semantic** (`principles.md`) — extracted rules grouped by topic
-- **Procedural** (`skills/*.md`) — step-by-step recipes for recurring tasks
+```
+Wing (person/project) → Hall (facts/events/...) → Room (topic) → Drawer (verbatim content)
+```
+
+Features:
+
+- **Palace structure** — wings, halls, rooms, drawers, tunnels (cross-wing links)
+- **BM25 semantic search** — pure Go implementation, no embeddings needed
+- **Temporal knowledge graph** — entity-relationship triples with validity windows + contradiction detection
+- **4-layer memory stack** — L0 Identity → L1 Critical Facts → L2 On-demand → L3 Deep Search
+- **Wake-up context** — compact (~120 token) AAAK-like compression for AI session starts
+- **MCP server** — 8 tools for Claude Code / ChatGPT / Cursor integration
+- **Mining** — files (code, docs) and conversations (Claude, ChatGPT, Slack, plain text)
+- **Auto-init** — any command bootstraps the palace on first use
+- **Zero LLM dependency** for core features (everything works offline)
 
 ## Install
 
-### Pre-built binaries (recommended)
+### Pre-built binaries
 
-Download from [GitHub Releases](https://github.com/snow-ghost/mem/releases/latest):
+Download from [Releases](https://github.com/snow-ghost/mem/releases/latest):
 
 ```bash
-# macOS (Apple Silicon)
-curl -fsSL https://github.com/snow-ghost/mem/releases/latest/download/mem-darwin-arm64.tar.gz | tar xz
-sudo mv mem-darwin-arm64 /usr/local/bin/mem
-
-# macOS (Intel)
-curl -fsSL https://github.com/snow-ghost/mem/releases/latest/download/mem-darwin-amd64.tar.gz | tar xz
-sudo mv mem-darwin-amd64 /usr/local/bin/mem
-
-# Linux (x86_64)
 curl -fsSL https://github.com/snow-ghost/mem/releases/latest/download/mem-linux-amd64.tar.gz | tar xz
 sudo mv mem-linux-amd64 /usr/local/bin/mem
-
-# Linux (ARM64)
-curl -fsSL https://github.com/snow-ghost/mem/releases/latest/download/mem-linux-arm64.tar.gz | tar xz
-sudo mv mem-linux-arm64 /usr/local/bin/mem
 ```
 
-### Via Go
+### From source
 
 ```bash
 go install github.com/snow-ghost/mem/cmd/mem@latest
@@ -46,363 +47,155 @@ go install github.com/snow-ghost/mem/cmd/mem@latest
 docker run --rm -v $(pwd):/project ghcr.io/snow-ghost/mem status
 ```
 
-Or build locally:
-
-```bash
-docker build -t mem .
-docker run --rm -v $(pwd):/project mem status
-```
-
-### From source
-
-```bash
-git clone https://github.com/snow-ghost/mem.git
-cd mem
-go build -o mem ./cmd/mem
-sudo mv mem /usr/local/bin/
-```
-
-### Requirements
-
-At least one supported AI coding agent:
-
-| Backend | Binary | Install |
-|---------|--------|---------|
-| Claude Code | `claude` | [docs.anthropic.com](https://docs.anthropic.com/en/docs/claude-code) |
-| OpenCode | `opencode` | [opencode.ai](https://opencode.ai) |
-| Codex (OpenAI) | `codex` | [developers.openai.com](https://developers.openai.com/codex/cli) |
-
-`mem` auto-detects which one is installed. No configuration needed.
+Requires Go 1.26+ only for building. At runtime, **zero runtime dependencies**.
 
 ## Quick Start
 
-### 1. Start using mem
-
 ```bash
-cd your-project
+# Initialize the palace (auto-creates ~/.mempalace/palace.db)
+mem init
+
+# Mine a project into the palace
+mem mine ~/projects/myapp --wing myapp
+
+# Mine conversation exports
+mem mine ~/chats --mode convos --wing conversations
+
+# Search across all memories
+mem search "why did we switch to GraphQL"
+
+# Filter by wing and room
+mem search "auth decision" --wing myapp --room auth
+
+# Compact context for AI session start
+mem wake-up
+
+# Knowledge graph operations
+mem kg add Kai works_on Orion --from 2025-06-01
+mem kg query Kai
+mem kg timeline Orion
+mem kg invalidate Kai works_on Orion --ended 2026-03-01
+
+# Status overview
 mem status
+
+# Start MCP server (for Claude Code integration)
+mem mcp
 ```
 
-That's it. The memory store is auto-initialized on first use — no `mem init` needed (though `mem init` still works for explicit setup).
+## How it works
 
-The `.memory/` directory:
+### Storage
 
-```
-.memory/
-├── episodes.jsonl          # event log (append-only)
-├── principles.md           # extracted rules
-├── skills/                 # one file per reusable procedure
-├── consolidation-log.md    # consolidation history
-└── prompts/                # LLM prompt templates (editable)
-    ├── extract.md
-    └── consolidate.md
-```
+Everything lives in a **single SQLite database** at `~/.mempalace/palace.db`
+(override with `MEM_PALACE` env var). Schema includes:
 
-### 2. Set up automatic extraction
+- `wings`, `rooms`, `drawers`, `closets` — palace hierarchy
+- `search_terms`, `search_index`, `search_meta` — BM25 inverted index
+- `entities`, `triples` — temporal knowledge graph
 
-#### Claude Code
+### Search
 
-Add to your Claude Code `settings.json`:
+Built-in **BM25 Okapi** implementation with our own inverted index:
 
-```json
-{
-  "hooks": {
-    "PostToolUse": [
-      {
-        "matcher": "Stop",
-        "command": "mem extract"
-      }
-    ]
-  }
-}
-```
+- Tokenization with stopword removal
+- TF computation with batch indexing (transactional)
+- Classic BM25 scoring (k1=1.5, b=0.75)
+- Filter by wing / room before scoring (for palace structure boost)
 
-#### OpenCode
+No vector embeddings, no external services, no LLM calls.
 
-Copy the plugin to your project:
+### Knowledge Graph
+
+Entity-relationship triples with temporal validity:
+
+- `add_triple(subject, predicate, object, valid_from, valid_to)`
+- `invalidate` facts when they stop being true
+- `query_entity` with `as_of` date filtering
+- `timeline` for chronological entity story
+- Contradiction detection — flags conflicts when adding facts
+
+### 4-Layer Memory Stack
+
+- **L0 (Identity)** — read from `~/.mempalace/identity.txt` if present
+- **L1 (Critical Facts)** — auto-compressed AAAK-like summary from top drawers
+- **L2 (On-demand)** — filtered retrieval by wing/room
+- **L3 (Deep Search)** — full BM25 search across palace
+
+`mem wake-up` outputs L0+L1 (~120-170 tokens) for AI session bootstrap.
+
+## MCP Integration
+
+Register as an MCP server for Claude Code / ChatGPT / Cursor:
 
 ```bash
-mkdir -p .opencode/plugins
-curl -fsSL https://raw.githubusercontent.com/snow-ghost/mem/main/.opencode/plugins/mem.ts \
-  -o .opencode/plugins/mem.ts
+# Claude Code
+claude mcp add mem -- mem mcp
+
+# Available tools:
+#   mem_search       — BM25 search with wing/room filters
+#   mem_add_drawer   — Store content in the palace
+#   mem_status       — Palace overview
+#   mem_wake_up      — Compact context for AI
+#   mem_kg_query     — Query the knowledge graph
+#   mem_kg_add       — Add fact to the graph
+#   mem_list_wings   — Enumerate wings
+#   mem_list_rooms   — Enumerate rooms in a wing
 ```
 
-The plugin automatically injects memory context at session start and extracts events when the session goes idle.
-
-#### Codex / Other agents
-
-Run after each session manually or via your agent's hook system:
-
-```bash
-mem extract
-```
-
-### 3. Check what's stored
-
-```bash
-mem status
-```
-
-```
-Memory Store: /home/user/project/.memory
-  Episodes:       12 / 200
-  Principles:     3 / 100
-  Skills:         1
-  Session count:  4 / 10 (next consolidation at 10)
-  Store size:     4820 bytes
-  Backend:        claude (auto-detected)
-```
-
-### 4. Consolidate when prompted
-
-After enough sessions (default: 10) or episodes (default: 100), `mem` recommends consolidation:
-
-```bash
-mem consolidate
-```
-
-This groups similar episodes into principles, creates skill files for repeated procedures, and cleans up duplicates.
-
-### 5. Inject context into new sessions
-
-```bash
-mem inject
-```
-
-Outputs relevant memory (principles, recent events, matching skills) for the agent to read at session start.
-
-## Commands
-
-### `mem init`
-
-Creates the `.memory/` directory with all required files.
-
-```bash
-mem init [--path <dir>]
-```
-
-### `mem extract`
-
-Captures significant events from the last session. Invokes the configured backend to analyze the git diff and identify decisions, errors, patterns, insights, and rollbacks.
-
-```bash
-mem extract [--session <id>] [--model <model>] [--backend <name>] [--dry-run]
-```
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--session` | git short hash | Session identifier |
-| `--model` | `haiku` | LLM model for analysis |
-| `--backend` | auto-detect | Backend: `claude`, `opencode`, `codex`, `custom` |
-| `--dry-run` | `false` | Print episodes without writing |
-
-### `mem consolidate`
-
-Analyzes accumulated episodes, extracts principles, detects skill candidates, and cleans up the store.
-
-```bash
-mem consolidate [--model <model>] [--backend <name>] [--dry-run] [--force]
-```
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--model` | `sonnet` | LLM model for analysis |
-| `--backend` | auto-detect | Backend override |
-| `--dry-run` | `false` | Show changes without applying |
-| `--force` | `false` | Run even if thresholds not reached |
-
-Exits with code 3 if thresholds are not met (use `--force` to override).
-
-### `mem inject`
-
-Assembles relevant memory context for a new session. No LLM call — pure file assembly.
-
-```bash
-mem inject [--episodes <n>] [--format <fmt>]
-```
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--episodes` | `10` | Number of recent episodes |
-| `--format` | `markdown` | Output format: `markdown` or `json` |
-
-Skills are matched against recent episode tags. If no skills match, all skills are listed.
-
-### `mem status`
-
-Shows memory store statistics, including detected backend.
-
-```bash
-mem status [--json] [--backend <name>]
-```
-
-All commands accept `--path <dir>` to override the default `.memory` location.
-
-## Multi-Backend Support
-
-`mem` works with multiple AI coding agents out of the box:
-
-| Backend | Binary | Invocation Pattern | Model Flag |
-|---------|--------|--------------------|------------|
-| Claude Code | `claude` | `claude -p "<prompt>" --model <model>` | Supported |
-| OpenCode | `opencode` | `opencode run "<prompt>"` | Not passed (uses provider default) |
-| Codex | `codex` | `codex exec "<prompt>" -m <model>` | Supported |
-
-### Backend Selection
-
-1. **Auto-detect** (default): checks which CLI is installed in order: `claude` > `opencode` > `codex`
-2. **Environment variable**: `export MEM_BACKEND=opencode`
-3. **Per-command flag**: `mem extract --backend codex`
-
-Priority: `--backend` flag > `MEM_BACKEND` env > auto-detect.
-
-### Custom Backend
-
-Use any CLI tool that accepts a prompt and returns text:
-
-```bash
-export MEM_BACKEND=custom
-export MEM_BACKEND_BINARY=/path/to/my-agent
-export MEM_BACKEND_ARGS="-p {prompt} --model {model}"
-mem extract
-```
-
-`{prompt}` and `{model}` are replaced with actual values. If `{model}` is absent from the template, the `--model` flag is silently ignored.
-
-## Configuration
-
-All settings via environment variables:
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `MEM_BACKEND` | (auto-detect) | Backend: `claude`, `opencode`, `codex`, `custom` |
-| `MEM_BACKEND_BINARY` | | Binary path for custom backend |
-| `MEM_BACKEND_ARGS` | `{prompt}` | Argument template for custom backend |
-| `MEM_PATH` | `.memory` | Memory store directory |
-| `MEM_SESSION_THRESHOLD` | `10` | Sessions before consolidation is recommended |
-| `MEM_EPISODE_THRESHOLD` | `100` | Episodes before consolidation is recommended |
-| `MEM_PRINCIPLES_MAX` | `100` | Maximum number of principles |
-| `MEM_EPISODES_MAX` | `200` | Maximum stored episodes |
-| `MEM_EPISODES_KEEP` | `50` | Recent episodes protected from cleanup |
-| `MEM_AGENT_ID` | `hostname-PID` | Agent identifier for multi-agent setups |
-
-## How It Works
-
-### Extraction (after each session)
-
-1. Reads the latest `git diff`
-2. Reads the last 20 episodes and current principles for context
-3. Sends everything to the configured backend with a prompt asking to identify significant events
-4. Deduplicates against existing episodes (exact match on type + summary)
-5. Appends new episodes to `episodes.jsonl` under file lock
-6. Increments the session counter and checks consolidation thresholds
-
-### Consolidation (periodic)
-
-1. Reads all episodes, principles, and skill list
-2. Sends to the configured backend for analysis and synthesis
-3. Merges new principles, deduplicates, enforces the 100-principle limit
-4. Removes flagged episodes, enforces the 200-episode limit (newest 50 protected)
-5. Creates skill files for procedures detected 3+ times
-6. Flags skills older than 6 months for review
-7. Detects conflicting decisions between different agents
-8. Writes a consolidation log entry and resets the session counter
-
-### Injection (before each session)
-
-1. Reads all principles
-2. Reads the N most recent episodes
-3. Loads all skills, matches against recent episode tags
-4. Outputs formatted context (Markdown or JSON) to stdout
-
-No LLM call — injection is a local file operation.
-
-## Multi-Agent Support
-
-When multiple agents work on the same project concurrently:
-
-- Each agent is identified by `MEM_AGENT_ID` (or auto-generated `hostname-PID`)
-- File locking (`flock`) prevents concurrent write corruption
-- Consolidation detects conflicting decisions from different agents and flags them for review
-
-```bash
-# Agent A
-MEM_AGENT_ID=agent-a mem extract
-
-# Agent B
-MEM_AGENT_ID=agent-b mem extract
-```
-
-## Customizing Prompts
-
-The LLM prompts used for extraction and consolidation are stored in `.memory/prompts/`. Edit them to tune what counts as a "significant event" or how principles are extracted:
-
-- `.memory/prompts/extract.md` — extraction prompt
-- `.memory/prompts/consolidate.md` — consolidation prompt
-
-If deleted, the built-in defaults are used.
-
-## File Formats
-
-### episodes.jsonl
-
-One JSON object per line:
-
-```json
-{"ts":"2026-03-20T14:32:00Z","session":"abc123","type":"decision","summary":"Chose JSONL over SQLite for event storage","tags":["architecture","storage"],"agent_id":"dev-laptop-1234"}
-```
-
-**Event types:** `decision`, `error`, `pattern`, `insight`, `rollback`
-
-### principles.md
-
-```markdown
-# Project Principles
+## Benchmarks
+
+Evaluated on **LongMemEval** (ICLR 2025), the standard long-term memory benchmark.
+
+| Metric | Value |
+|---|---|
+| Recall@1 | 45.6% |
+| **Recall@5** | **69.4%** |
+| Recall@10 | 78.4% |
+| Full run (500 questions) | **~31 seconds** |
+| Avg query latency | 7.1 ms |
+
+### Comparison
+
+| System | R@5 | Approach |
+|---|---|---|
+| MemPalace (ChromaDB embeddings) | 96.6% | Semantic vectors, Python |
+| Mem0 / Zep | ~85% | LLM extraction |
+| **mem (BM25, ours)** | **69.4%** | Pure Go, no LLM, no embeddings |
+| BM25 flat baseline (published) | ~70% | LongMemEval paper |
+
+Our score matches the published BM25 baseline, confirming the implementation is correct.
+See [`benchmarks/README.md`](benchmarks/README.md) for details and reproduction steps.
 
 ## Architecture
-- Use JSONL for append-only logs — simpler git diffs, no driver dependency
-- Memory files must stay under 150 lines
 
-## Testing
-- Always use file locks for concurrent writes — prevents race conditions
+```
+cmd/mem/               CLI entry
+internal/
+  config/              Configuration (env vars, paths)
+  db/                  SQLite schema + connection
+  palace/              Wings, rooms, drawers, tunnels
+  search/              BM25 tokenizer + indexer + search
+  kg/                  Temporal knowledge graph + contradiction detection
+  layers/              4-layer memory stack (L0 identity, L1 compression, wake-up)
+  miner/               File and conversation mining (Claude JSONL, ChatGPT, Slack, plain text)
+  mcp/                 MCP server with 8 tools
+benchmarks/            LongMemEval evaluation harness
 ```
 
-### skills/{slug}.md
+## Dependencies
 
-```markdown
-# Database Migration
+**Only 2 external dependencies** (pure Go, no CGo):
 
-## When to apply
-- Need to change DB schema
+- `modernc.org/sqlite` — pure-Go SQLite driver (no CGo = static binary)
+- `github.com/modelcontextprotocol/go-sdk` — official MCP SDK
 
-## Prerequisites
-- Database access
-- Backup of current schema
+Everything else is Go stdlib.
 
-## Steps
-1. Create migration file
-2. Write SQL (Up and Down)
-3. Apply migration
-4. Verify status
-5. Regenerate models
+## Previous code (LLM-dependent memory companion)
 
-## Success verification
-- Migration status shows Applied
-- Tests pass
-
-## Anti-patterns
-- Do not edit generated model files
-```
-
-## Development
-
-```bash
-go test -race -shuffle=on ./...    # 87 tests
-go build -o mem ./cmd/mem          # build
-go vet ./...                       # lint
-```
-
-Zero external dependencies — stdlib only.
+The previous version of `mem` (LLM-dependent extraction/consolidation with Claude/OpenCode/Codex backends)
+lives at [github.com/snow-ghost/mem-agent](https://github.com/snow-ghost/mem-agent).
 
 ## License
 

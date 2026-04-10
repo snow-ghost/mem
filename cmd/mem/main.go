@@ -1,7 +1,7 @@
 package main
 
 import (
-	"encoding/json"
+	"context"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -9,14 +9,13 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/snow-ghost/mem/internal/agent"
+	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/snow-ghost/mem/internal/config"
-	"github.com/snow-ghost/mem/internal/consolidation"
-	"github.com/snow-ghost/mem/internal/episode"
-	"github.com/snow-ghost/mem/internal/principle"
-	"github.com/snow-ghost/mem/internal/runner"
-	"github.com/snow-ghost/mem/internal/skill"
-	"github.com/snow-ghost/mem/internal/store"
+	"github.com/snow-ghost/mem/internal/kg"
+	"github.com/snow-ghost/mem/internal/layers"
+	mcpserver "github.com/snow-ghost/mem/internal/mcp"
+	"github.com/snow-ghost/mem/internal/palace"
+	"github.com/snow-ghost/mem/internal/search"
 )
 
 func main() {
@@ -30,14 +29,18 @@ func main() {
 	switch os.Args[1] {
 	case "init":
 		os.Exit(runInit(os.Args[2:]))
-	case "extract":
-		os.Exit(runExtract(os.Args[2:]))
-	case "consolidate":
-		os.Exit(runConsolidate(os.Args[2:]))
-	case "inject":
-		os.Exit(runInject(os.Args[2:]))
+	case "mine":
+		os.Exit(runMine(os.Args[2:]))
+	case "search":
+		os.Exit(runSearch(os.Args[2:]))
 	case "status":
 		os.Exit(runStatus(os.Args[2:]))
+	case "wake-up":
+		os.Exit(runWakeUp(os.Args[2:]))
+	case "kg":
+		os.Exit(runKG(os.Args[2:]))
+	case "mcp":
+		os.Exit(runMCP(os.Args[2:]))
 	default:
 		fmt.Fprintf(os.Stderr, "mem: unknown command %q\n", os.Args[1])
 		usage()
@@ -49,283 +52,454 @@ func usage() {
 	fmt.Fprintln(os.Stderr, `Usage: mem <command> [flags]
 
 Commands:
-  init         Initialize memory store
-  extract      Capture events from last session
-  consolidate  Consolidate episodes into principles
-  inject       Output memory context for new session
-  status       Show memory store statistics`)
+  init         Initialize memory palace
+  mine         Ingest files into palace
+  search       Search memories
+  status       Palace overview
+  wake-up      Load compact context for AI session
+  kg           Knowledge graph operations
+  mcp          Start MCP server`)
 }
 
-func ensureStore(s *store.MemoryStore) int {
-	created, err := s.EnsureInit()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "mem: %v\n", err)
-		return 1
+func runStub(cmd string) int {
+	fmt.Fprintf(os.Stderr, "mem: %s: not yet implemented\n", cmd)
+	return 1
+}
+
+func resolveConfig(args []string) config.Config {
+	cfg := config.Load()
+	fs := flag.NewFlagSet("", flag.ContinueOnError)
+	var palaceFlag string
+	fs.StringVar(&palaceFlag, "palace", "", "override palace path")
+	fs.Parse(args)
+	if palaceFlag != "" {
+		cfg.PalacePath = palaceFlag
 	}
-	if created {
-		fmt.Fprintf(os.Stderr, "mem: initialized memory store at %s\n", s.Root)
-	}
-	return 0
+	return cfg
 }
 
 func runInit(args []string) int {
-	cfg := config.Load()
-	var pathFlag string
-	fs := flag.NewFlagSet("init", flag.ContinueOnError)
-	fs.StringVar(&pathFlag, "path", "", "override memory store path")
-	fs.Parse(args)
-	if pathFlag != "" {
-		cfg.MemPath = pathFlag
-	}
-	absPath, _ := filepath.Abs(cfg.MemPath)
-	s := store.New(absPath)
-
-	if err := s.Init(); err != nil {
+	cfg := resolveConfig(args)
+	d, err := palace.Init(cfg)
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "mem: init: %v\n", err)
 		return 1
 	}
-	fmt.Printf("Initialized memory store at %s\n", s.Root)
-	fmt.Println("Created: episodes.jsonl, principles.md, skills/, consolidation-log.md, prompts/")
-	fmt.Println()
-	fmt.Println("To enable automatic extraction after each session, add a hook to your agent's config:")
-	fmt.Println(`  command: "mem extract"`)
-	fmt.Println()
-	fmt.Println("Supported backends: claude, opencode, codex (auto-detected)")
-	fmt.Println("Set MEM_BACKEND to choose explicitly, or mem will auto-detect.")
+	d.Close()
+	fmt.Printf("Initialized palace at %s\n", cfg.PalacePath)
 	return 0
 }
 
 func runStatus(args []string) int {
-	var jsonFlag bool
-	var pathFlag, backendFlag string
-	fs := flag.NewFlagSet("status", flag.ContinueOnError)
-	fs.BoolVar(&jsonFlag, "json", false, "output as JSON")
-	fs.StringVar(&pathFlag, "path", "", "override memory store path")
-	fs.StringVar(&backendFlag, "backend", "", "override backend")
+	cfg := resolveConfig(args)
+	d, err := palace.Init(cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "mem: status: %v\n", err)
+		return 1
+	}
+	defer d.Close()
+
+	s, err := palace.GetStatus(d, cfg.PalacePath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "mem: status: %v\n", err)
+		return 1
+	}
+
+	fmt.Printf("Palace: %s\n", s.PalacePath)
+	fmt.Printf("  Wings:   %d\n", s.Wings)
+	fmt.Printf("  Rooms:   %d\n", s.Rooms)
+	fmt.Printf("  Drawers: %d\n", s.Drawers)
+	return 0
+}
+
+func runMine(args []string) int {
+	var wingFlag, modeFlag string
+	fs := flag.NewFlagSet("mine", flag.ContinueOnError)
+	fs.StringVar(&wingFlag, "wing", "", "wing name")
+	fs.StringVar(&modeFlag, "mode", "files", "mining mode: files or convos")
+	var palaceFlag string
+	fs.StringVar(&palaceFlag, "palace", "", "override palace path")
 	fs.Parse(args)
 
+	if fs.NArg() < 1 {
+		fmt.Fprintln(os.Stderr, "mem: mine: directory argument required")
+		return 1
+	}
+	dir := fs.Arg(0)
+
 	cfg := config.Load()
-	if pathFlag != "" {
-		cfg.MemPath = pathFlag
-	}
-	absPath, _ := filepath.Abs(cfg.MemPath)
-	s := store.New(absPath)
-	if code := ensureStore(s); code != 0 {
-		return code
+	if palaceFlag != "" {
+		cfg.PalacePath = palaceFlag
 	}
 
-	epCount, err := episode.Count(s.EpisodesPath())
+	d, err := palace.Init(cfg)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "mem: status: %v\n", err)
-		return 2
+		fmt.Fprintf(os.Stderr, "mem: mine: %v\n", err)
+		return 1
 	}
+	defer d.Close()
 
-	principles, err := principle.Parse(s.PrinciplesPath())
+	if wingFlag == "" {
+		wingFlag = filepath.Base(dir)
+	}
+	wing, err := palace.CreateWing(d, wingFlag, "project", "")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "mem: status: %v\n", err)
-		return 2
-	}
-	princCount := principle.Count(principles)
-
-	skills, err := skill.List(s.SkillsDir())
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "mem: status: %v\n", err)
-		return 2
+		fmt.Fprintf(os.Stderr, "mem: mine: %v\n", err)
+		return 1
 	}
 
-	sessCount, _ := s.ReadSessionCount()
-	storeSize, _ := s.StoreSize()
-	lastEntry, _ := consolidation.ReadLast(s.ConsolidationLogPath())
+	var filesProcessed, drawersCreated, duplicatesSkipped int
 
-	backendName := "(none)"
-	backendSource := ""
-	if b, err := agent.Resolve(cfg, backendFlag); err == nil {
-		backendName = b.Name
-		backendSource = b.Source
+	textExts := map[string]bool{
+		".go": true, ".py": true, ".js": true, ".ts": true, ".md": true,
+		".txt": true, ".yaml": true, ".yml": true, ".json": true, ".toml": true,
+		".rs": true, ".java": true, ".c": true, ".h": true, ".cpp": true,
+		".rb": true, ".php": true, ".sh": true, ".css": true, ".html": true,
+		".sql": true, ".xml": true, ".csv": true, ".log": true, ".env": true,
+		".cfg": true, ".ini": true, ".conf": true, ".jsonl": true,
 	}
 
-	if jsonFlag {
-		out := map[string]any{
-			"path":               s.Root,
-			"episodes":           map[string]any{"count": epCount, "max": cfg.EpisodesMax},
-			"principles":         map[string]any{"count": princCount, "max": cfg.PrinciplesMax},
-			"skills":             len(skills),
-			"session_count":      map[string]any{"current": sessCount, "threshold": cfg.SessionThreshold},
-			"last_consolidation": lastEntry.Date,
-			"store_size_bytes":   storeSize,
-			"backend":            map[string]any{"name": backendName, "source": backendSource},
+	type pendingIndex struct {
+		ID      int64
+		Content string
+	}
+	var toIndex []pendingIndex
+
+	filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return nil
 		}
-		enc := json.NewEncoder(os.Stdout)
-		enc.SetIndent("", "  ")
-		enc.Encode(out)
+		if info.Size() > 10*1024*1024 || info.Size() == 0 {
+			return nil
+		}
+		ext := strings.ToLower(filepath.Ext(path))
+		if !textExts[ext] && ext != "" {
+			return nil
+		}
+
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil
+		}
+		content := string(data)
+		if len(content) < 10 {
+			return nil
+		}
+
+		filesProcessed++
+
+		roomName := detectRoom(content)
+		room, err := palace.CreateRoom(d, roomName, wing.ID)
+		if err != nil {
+			return nil
+		}
+
+		drawer, err := palace.AddDrawer(d, content, wing.ID, room.ID, "facts", path, "file")
+		if err != nil {
+			return nil
+		}
+		if drawer == nil {
+			duplicatesSkipped++
+			return nil
+		}
+
+		drawersCreated++
+		toIndex = append(toIndex, pendingIndex{ID: drawer.ID, Content: content})
+		return nil
+	})
+
+	// Batch index all new drawers in a single transaction
+	items := make([]struct{ ID int64; Content string }, len(toIndex))
+	for i, p := range toIndex {
+		items[i] = struct{ ID int64; Content string }{p.ID, p.Content}
+	}
+	if err := search.IndexBatch(d, items); err != nil {
+		fmt.Fprintf(os.Stderr, "mem: mine: index: %v\n", err)
+	}
+
+	fmt.Printf("Mined %s into wing %q\n", dir, wingFlag)
+	fmt.Printf("  Files processed: %d\n", filesProcessed)
+	fmt.Printf("  Drawers created: %d\n", drawersCreated)
+	fmt.Printf("  Duplicates skipped: %d\n", duplicatesSkipped)
+	return 0
+}
+
+func runSearch(args []string) int {
+	var wingFlag, roomFlag string
+	var limitFlag int
+	fs := flag.NewFlagSet("search", flag.ContinueOnError)
+	fs.StringVar(&wingFlag, "wing", "", "filter by wing")
+	fs.StringVar(&roomFlag, "room", "", "filter by room")
+	fs.IntVar(&limitFlag, "limit", 5, "max results")
+	var palaceFlag string
+	fs.StringVar(&palaceFlag, "palace", "", "override palace path")
+	fs.Parse(args)
+
+	if fs.NArg() < 1 {
+		fmt.Fprintln(os.Stderr, "mem: search: query argument required")
+		return 1
+	}
+	query := strings.Join(fs.Args(), " ")
+
+	cfg := config.Load()
+	if palaceFlag != "" {
+		cfg.PalacePath = palaceFlag
+	}
+
+	d, err := palace.Init(cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "mem: search: %v\n", err)
+		return 1
+	}
+	defer d.Close()
+
+	var wingID, roomID int64
+	if wingFlag != "" {
+		w, err := palace.GetWing(d, wingFlag)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "mem: search: wing %q not found\n", wingFlag)
+			return 1
+		}
+		wingID = w.ID
+	}
+	if roomFlag != "" && wingID > 0 {
+		r, err := palace.GetRoom(d, roomFlag, wingID)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "mem: search: room %q not found\n", roomFlag)
+			return 1
+		}
+		roomID = r.ID
+	}
+
+	results, err := search.Search(d, query, wingID, roomID, limitFlag)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "mem: search: %v\n", err)
+		return 1
+	}
+
+	if len(results) == 0 {
+		fmt.Printf("No results for %q\n", query)
 		return 0
 	}
 
-	fmt.Printf("Memory Store: %s\n", s.Root)
-	fmt.Printf("  Episodes:       %d / %d\n", epCount, cfg.EpisodesMax)
-	fmt.Printf("  Principles:     %d / %d\n", princCount, cfg.PrinciplesMax)
-	fmt.Printf("  Skills:         %d\n", len(skills))
-	fmt.Printf("  Session count:  %d / %d (next consolidation at %d)\n", sessCount, cfg.SessionThreshold, cfg.SessionThreshold)
-	if lastEntry.Date != "" {
-		fmt.Printf("  Last consolidation: %s\n", lastEntry.Date)
-	}
-	fmt.Printf("  Store size:     %d bytes\n", storeSize)
-	if backendSource != "" {
-		fmt.Printf("  Backend:        %s (%s)\n", backendName, backendSource)
+	fmt.Printf("Results for %q (%d found):\n\n", query, len(results))
+	for i, r := range results {
+		fmt.Printf("[%d] %s / %s  (score: %.3f)\n", i+1, r.WingName, r.RoomName, r.Score)
+		fmt.Printf("    Source: %s\n", filepath.Base(r.SourceFile))
+		snippet := r.Content
+		if len(snippet) > 200 {
+			snippet = snippet[:200] + "..."
+		}
+		snippet = strings.ReplaceAll(snippet, "\n", " ")
+		fmt.Printf("    %s\n\n", snippet)
 	}
 	return 0
 }
 
-func runExtract(args []string) int {
-	var sessionFlag, modelFlag, pathFlag, backendFlag string
-	var dryRunFlag bool
-	fs := flag.NewFlagSet("extract", flag.ContinueOnError)
-	fs.StringVar(&sessionFlag, "session", "", "session ID")
-	fs.StringVar(&modelFlag, "model", "haiku", "LLM model")
-	fs.BoolVar(&dryRunFlag, "dry-run", false, "print without writing")
-	fs.StringVar(&pathFlag, "path", "", "override memory store path")
-	fs.StringVar(&backendFlag, "backend", "", "override backend (claude, opencode, codex, custom)")
+func detectRoom(content string) string {
+	tokens := search.Tokenize(content)
+	if len(tokens) == 0 {
+		return "general"
+	}
+	freq := search.TokenFrequency(tokens)
+
+	type kv struct {
+		k string
+		v float64
+	}
+	var top []kv
+	for k, v := range freq {
+		top = append(top, kv{k, v})
+	}
+	for i := 0; i < len(top); i++ {
+		for j := i + 1; j < len(top); j++ {
+			if top[j].v > top[i].v {
+				top[i], top[j] = top[j], top[i]
+			}
+		}
+	}
+
+	var parts []string
+	for i, kv := range top {
+		if i >= 2 {
+			break
+		}
+		parts = append(parts, kv.k)
+	}
+	if len(parts) == 0 {
+		return "general"
+	}
+	return strings.Join(parts, "-")
+}
+
+func runWakeUp(args []string) int {
+	var wingFlag, palaceFlag string
+	fs := flag.NewFlagSet("wake-up", flag.ContinueOnError)
+	fs.StringVar(&wingFlag, "wing", "", "filter by wing")
+	fs.StringVar(&palaceFlag, "palace", "", "override palace path")
 	fs.Parse(args)
 
 	cfg := config.Load()
-	if pathFlag != "" {
-		cfg.MemPath = pathFlag
+	if palaceFlag != "" {
+		cfg.PalacePath = palaceFlag
 	}
-	absPath, _ := filepath.Abs(cfg.MemPath)
-	s := store.New(absPath)
-	if code := ensureStore(s); code != 0 {
-		return code
-	}
-
-	if sessionFlag == "" {
-		sessionFlag = runner.GetGitShortHash()
-	}
-
-	backend, err := agent.Resolve(cfg, backendFlag)
+	d, err := palace.Init(cfg)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "mem: extract: %v\n", err)
+		fmt.Fprintf(os.Stderr, "mem: wake-up: %v\n", err)
 		return 1
 	}
-	inv := agent.NewInvoker(backend)
+	defer d.Close()
 
-	result, err := runner.RunExtract(cfg, s, inv, sessionFlag, modelFlag, dryRunFlag)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "mem: extract: %v\n", err)
-		return 1
-	}
-
-	if result.NewCount == 0 {
-		fmt.Println("No significant events found.")
-	} else {
-		action := "Extracted"
-		if dryRunFlag {
-			action = "Would extract"
-		}
-		fmt.Printf("%s %d episodes from session %s\n", action, result.NewCount, sessionFlag)
-		for _, ep := range result.Episodes {
-			fmt.Printf("  [%s] %s\n", ep.Type, ep.Summary)
-		}
-	}
-	fmt.Printf("Session count: %d/%d", result.SessionCount, cfg.SessionThreshold)
-	if result.ThresholdReached {
-		fmt.Print(" — consolidation recommended (run: mem consolidate)")
-	}
+	fmt.Print(layers.WakeUp(d, cfg, wingFlag))
 	fmt.Println()
 	return 0
 }
 
-func runConsolidate(args []string) int {
-	var modelFlag, pathFlag, backendFlag string
-	var dryRunFlag, forceFlag bool
-	fs := flag.NewFlagSet("consolidate", flag.ContinueOnError)
-	fs.StringVar(&modelFlag, "model", "sonnet", "LLM model")
-	fs.BoolVar(&dryRunFlag, "dry-run", false, "show proposed changes without applying")
-	fs.BoolVar(&forceFlag, "force", false, "run even if thresholds not reached")
-	fs.StringVar(&pathFlag, "path", "", "override memory store path")
-	fs.StringVar(&backendFlag, "backend", "", "override backend (claude, opencode, codex, custom)")
-	fs.Parse(args)
+func runKG(args []string) int {
+	if len(args) < 1 {
+		fmt.Fprintln(os.Stderr, "mem: kg: subcommand required (add, query, timeline, invalidate, stats)")
+		return 1
+	}
+
+	subcmd := args[0]
+	subargs := args[1:]
 
 	cfg := config.Load()
-	if pathFlag != "" {
-		cfg.MemPath = pathFlag
-	}
-	absPath, _ := filepath.Abs(cfg.MemPath)
-	s := store.New(absPath)
-	if code := ensureStore(s); code != 0 {
-		return code
+	// Check for --palace flag in remaining args
+	for i, a := range subargs {
+		if a == "--palace" && i+1 < len(subargs) {
+			cfg.PalacePath = subargs[i+1]
+		}
 	}
 
-	backend, err := agent.Resolve(cfg, backendFlag)
+	d, err := palace.Init(cfg)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "mem: consolidate: %v\n", err)
+		fmt.Fprintf(os.Stderr, "mem: kg: %v\n", err)
 		return 1
 	}
-	inv := agent.NewInvoker(backend)
+	defer d.Close()
 
-	result, err := runner.RunConsolidate(cfg, s, inv, modelFlag, dryRunFlag, forceFlag)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "mem: consolidate: %v\n", err)
+	switch subcmd {
+	case "add":
+		if len(subargs) < 3 {
+			fmt.Fprintln(os.Stderr, "mem: kg add <subject> <predicate> <object> [--from DATE] [--to DATE]")
+			return 1
+		}
+		var from, to string
+		fs := flag.NewFlagSet("kg-add", flag.ContinueOnError)
+		fs.StringVar(&from, "from", "", "valid from date")
+		fs.StringVar(&to, "to", "", "valid to date")
+		fs.Parse(subargs[3:])
+
+		conflicts, _ := kg.CheckContradiction(d, subargs[0], subargs[1], subargs[2])
+		if len(conflicts) > 0 {
+			for _, c := range conflicts {
+				fmt.Fprintf(os.Stderr, "  CONFLICT: %s %s %s (existing: %s)\n", c.Subject, c.Predicate, c.NewObj, c.ExistingObj)
+			}
+		}
+
+		id, err := kg.AddTriple(d, subargs[0], subargs[1], subargs[2], from, to)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "mem: kg add: %v\n", err)
+			return 1
+		}
+		fmt.Printf("Added: %s → %s → %s (id: %s)\n", subargs[0], subargs[1], subargs[2], id[:12])
+
+	case "query":
+		if len(subargs) < 1 {
+			fmt.Fprintln(os.Stderr, "mem: kg query <entity> [--as-of DATE]")
+			return 1
+		}
+		var asOf string
+		fs := flag.NewFlagSet("kg-query", flag.ContinueOnError)
+		fs.StringVar(&asOf, "as-of", "", "query as of date")
+		fs.Parse(subargs[1:])
+
+		results, err := kg.QueryEntity(d, subargs[0], asOf, "both")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "mem: kg query: %v\n", err)
+			return 1
+		}
+		if len(results) == 0 {
+			fmt.Printf("No facts found for %q\n", subargs[0])
+			return 0
+		}
+		for _, r := range results {
+			status := "current"
+			if !r.Current {
+				status = "ended:" + r.ValidTo
+			}
+			fmt.Printf("  %s → %s → %s  [%s] (%s)\n", r.SubjName, r.Predicate, r.ObjName, status, r.ValidFrom)
+		}
+
+	case "timeline":
+		if len(subargs) < 1 {
+			fmt.Fprintln(os.Stderr, "mem: kg timeline <entity>")
+			return 1
+		}
+		results, err := kg.Timeline(d, subargs[0])
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "mem: kg timeline: %v\n", err)
+			return 1
+		}
+		for _, r := range results {
+			period := r.ValidFrom
+			if r.ValidTo != "" {
+				period += " → " + r.ValidTo
+			} else {
+				period += " → now"
+			}
+			fmt.Printf("  [%s] %s %s %s\n", period, r.SubjName, r.Predicate, r.ObjName)
+		}
+
+	case "invalidate":
+		if len(subargs) < 3 {
+			fmt.Fprintln(os.Stderr, "mem: kg invalidate <subject> <predicate> <object> --ended DATE")
+			return 1
+		}
+		var ended string
+		fs := flag.NewFlagSet("kg-inv", flag.ContinueOnError)
+		fs.StringVar(&ended, "ended", "", "end date")
+		fs.Parse(subargs[3:])
+		if err := kg.Invalidate(d, subargs[0], subargs[1], subargs[2], ended); err != nil {
+			fmt.Fprintf(os.Stderr, "mem: kg invalidate: %v\n", err)
+			return 1
+		}
+		fmt.Printf("Invalidated: %s → %s → %s\n", subargs[0], subargs[1], subargs[2])
+
+	case "stats":
+		entities, triples, current, _ := kg.Stats(d)
+		fmt.Printf("Knowledge Graph:\n  Entities: %d\n  Triples: %d (current: %d, expired: %d)\n",
+			entities, triples, current, triples-current)
+
+	default:
+		fmt.Fprintf(os.Stderr, "mem: kg: unknown subcommand %q\n", subcmd)
 		return 1
-	}
-
-	if result.Skipped {
-		fmt.Fprintln(os.Stderr, "mem: consolidate: thresholds not reached (use --force to override)")
-		return 3
-	}
-
-	action := "Consolidation"
-	if dryRunFlag {
-		action = "Dry run"
-	}
-	fmt.Printf("%s complete\n", action)
-	fmt.Printf("  Episodes processed: %d\n", result.EpisodesProcessed)
-	fmt.Printf("  Principles added: %d\n", result.PrinciplesAdded)
-	fmt.Printf("  Episodes removed: %d\n", result.EpisodesRemoved)
-	fmt.Printf("  Skills created: %d\n", result.SkillsCreated)
-	if len(result.SkillCandidates) > 0 {
-		fmt.Printf("  Skill candidates: %s\n", strings.Join(result.SkillCandidates, ", "))
-	}
-	if len(result.Conflicts) > 0 {
-		fmt.Printf("  Conflicts: %d (review recommended)\n", len(result.Conflicts))
 	}
 	return 0
 }
 
-func runInject(args []string) int {
-	var episodesFlag int
-	var formatFlag, pathFlag string
-	fs := flag.NewFlagSet("inject", flag.ContinueOnError)
-	fs.IntVar(&episodesFlag, "episodes", 10, "number of recent episodes")
-	fs.StringVar(&formatFlag, "format", "markdown", "output format: markdown or json")
-	fs.StringVar(&pathFlag, "path", "", "override memory store path")
+func runMCP(args []string) int {
+	var palaceFlag string
+	fs := flag.NewFlagSet("mcp", flag.ContinueOnError)
+	fs.StringVar(&palaceFlag, "palace", "", "override palace path")
 	fs.Parse(args)
 
 	cfg := config.Load()
-	if pathFlag != "" {
-		cfg.MemPath = pathFlag
+	if palaceFlag != "" {
+		cfg.PalacePath = palaceFlag
 	}
-	absPath, _ := filepath.Abs(cfg.MemPath)
-	s := store.New(absPath)
-	if code := ensureStore(s); code != 0 {
-		return code
-	}
-
-	ctx, err := runner.RunInject(cfg, s, episodesFlag)
+	d, err := palace.Init(cfg)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "mem: inject: %v\n", err)
+		fmt.Fprintf(os.Stderr, "mem: mcp: %v\n", err)
 		return 1
 	}
+	defer d.Close()
 
-	switch formatFlag {
-	case "json":
-		out, err := runner.FormatJSON(ctx)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "mem: inject: %v\n", err)
-			return 1
-		}
-		fmt.Println(out)
-	default:
-		fmt.Print(runner.FormatMarkdown(ctx))
+	s := mcpserver.NewServer(d, cfg)
+	if err := s.Run(context.Background(), &gomcp.StdioTransport{}); err != nil {
+		fmt.Fprintf(os.Stderr, "mem: mcp: %v\n", err)
+		return 1
 	}
 	return 0
 }
