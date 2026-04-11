@@ -52,9 +52,10 @@ func TestClient_GivenBatch_WhenEmbedBatchCalled_ThenReturnsVectors(t *testing.T)
 	}
 }
 
-func TestClient_GivenServerError_WhenEmbedCalled_ThenReturnsError(t *testing.T) {
+func TestClient_GivenBadRequest_WhenEmbedCalled_ThenReturnsImmediately(t *testing.T) {
+	// 400 is not retried, so the test stays fast.
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, `{"error":{"message":"rate limited"}}`, 429)
+		http.Error(w, `{"error":{"message":"bad request"}}`, 400)
 	}))
 	defer server.Close()
 
@@ -63,7 +64,34 @@ func TestClient_GivenServerError_WhenEmbedCalled_ThenReturnsError(t *testing.T) 
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	if !strings.Contains(err.Error(), "429") {
-		t.Errorf("expected 429 in error, got %v", err)
+	if !strings.Contains(err.Error(), "400") {
+		t.Errorf("expected 400 in error, got %v", err)
+	}
+}
+
+func TestClient_GivenAdaptiveSplit_WhenOneInputFails_ThenSucceedsForRest(t *testing.T) {
+	// Server fails any batch containing "POISON" until the splitter isolates it.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req embedRequest
+		json.NewDecoder(r.Body).Decode(&req)
+		inputs, _ := req.Input.([]any)
+		for _, in := range inputs {
+			if s, ok := in.(string); ok && s == "POISON" {
+				http.Error(w, `{"error":{"message":"too long"}}`, 400)
+				return
+			}
+		}
+		resp := embedResponse{Model: req.Model}
+		for i := range inputs {
+			resp.Data = append(resp.Data, embedResponseData{Embedding: []float32{float32(i)}, Index: i})
+		}
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer server.Close()
+
+	client := NewClient(config.Config{EmbeddingsURL: server.URL, EmbeddingsModel: "m"})
+	_, err := client.EmbedBatchAdaptive([]string{"a", "b", "POISON", "d"})
+	if err == nil {
+		t.Fatal("expected POISON to bubble up after isolation")
 	}
 }

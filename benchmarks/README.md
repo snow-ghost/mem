@@ -32,34 +32,58 @@ go build -o /tmp/longmemeval-bench ./benchmarks/longmemeval/
 /tmp/longmemeval-bench /tmp/longmemeval-data/longmemeval_oracle.json
 ```
 
+#### Hybrid mode (BM25 + semantic embeddings)
+
+```bash
+export MEM_EMBEDDINGS_URL='https://your-endpoint/v1/embeddings'
+export MEM_EMBEDDINGS_MODEL='BAAI/bge-m3'         # or any embedding model
+export MEM_EMBEDDINGS_API_KEY='your-key'
+LME_MODE=hybrid /tmp/longmemeval-bench /tmp/longmemeval-data/longmemeval_oracle.json
+```
+
+`LME_MODE` accepts `bm25` (default), `vector` (cosine only), or `hybrid`
+(BM25 + cosine fused via RRF, k=60). Any OpenAI-compatible `/v1/embeddings`
+endpoint works (OpenAI, Voyage, Cohere compat, Ollama, LM Studio,
+LocalAI, llama.cpp server, cloud.ru foundation-models, etc.).
+
 ### What it measures
 
 - **Recall@1 / @5 / @10** — does the correct evidence appear in the top-N results?
 - **Per-type breakdown** — accuracy on each of the 6 question types
 - **Timing** — total runtime, index build time, average query latency
 
-### Current results (mem BM25, single-session drawers)
+### Current results
 
-| Metric | Value |
-|---|---|
-| Recall@1 | 45.6% |
-| **Recall@5** | **69.4%** |
-| Recall@10 | 78.4% |
-| Index build | 27.4s (948 sessions → 861 drawers) |
-| Search total | 3.5s (500 queries) |
-| Avg query latency | 7.1ms |
-| **Full run** | **~31 seconds** |
+Two modes measured: pure BM25 (default, offline) and hybrid BM25 + bge-m3 via
+Reciprocal Rank Fusion (k=60).
 
-#### Per-type Recall@5
+| Metric | BM25 | Hybrid (bge-m3 + RRF) |
+|---|---:|---:|
+| Recall@1 | 45.6% | **51.2%** |
+| **Recall@5** | 69.4% | **74.2%** |
+| Recall@10 | 78.4% | **79.4%** |
+| BM25 index build | 27.4s | 27.5s |
+| Embedding index build | — | 4m58s (bge-m3 via cloud.ru, 8 workers) |
+| Avg query latency | 7.1ms | 377ms (full-scan vector search) |
 
-| Type | R@5 |
-|---|---|
-| single-session-assistant | **98.2%** |
-| single-session-user | 81.4% |
-| knowledge-update | 78.2% |
-| multi-session | 64.7% |
-| single-session-preference | 56.7% |
-| temporal-reasoning | 53.4% |
+The hybrid run used `BAAI/bge-m3` (1024-dim) via the cloud.ru
+foundation-models API. Drawer text was truncated to 1500 chars before
+embedding to avoid hitting server-side input-length issues.
+
+#### Per-type Recall@5: BM25 vs hybrid
+
+| Type | BM25 | Hybrid | Δ |
+|---|---:|---:|---:|
+| knowledge-update | 78.2% | **87.2%** | **+9.0** |
+| temporal-reasoning | 53.4% | **61.7%** | **+8.3** |
+| single-session-preference | 56.7% | **66.7%** | **+10.0** |
+| multi-session | 64.7% | **68.4%** | **+3.7** |
+| single-session-assistant | **98.2%** | 96.4% | -1.8 |
+| single-session-user | **81.4%** | 80.0% | -1.4 |
+
+The big wins are in categories where lexical overlap is weak — exactly where
+semantic embeddings should help. Categories with strong lexical signal
+regress slightly because RRF gives the (worse) vector ranking equal weight.
 
 #### Comparison with other memory systems
 
@@ -68,17 +92,20 @@ go build -o /tmp/longmemeval-bench ./benchmarks/longmemeval/
 | MemPalace (ChromaDB embeddings) | 96.6% | Semantic vectors, Python |
 | Mem0 | ~85% | LLM extraction |
 | Zep | ~85% | LLM extraction |
+| **mem (hybrid, ours)** | **74.2%** | Pure Go, BM25 + bge-m3 hybrid via RRF |
 | **mem (BM25, ours)** | **69.4%** | Pure Go, BM25 only, no LLM, no embeddings, no network |
 | BM25 flat baseline (published) | ~70% | LongMemEval paper |
 
 ### Notes
 
-- `mem` uses **pure BM25** retrieval with our own inverted index (SQLite-backed).
-  No semantic embeddings, no external API calls, no LLM in the hot path.
-- The score matches the **published BM25 baseline (~70%)** from the LongMemEval paper,
-  confirming the BM25 implementation is correct.
-- To reach 85%+ (Mem0/Zep level) or 96%+ (MemPalace level) you'd need semantic
-  embeddings — a separate feature that would add model dependencies.
+- The BM25 score matches the **published BM25 baseline (~70%)** from the
+  LongMemEval paper, confirming the BM25 implementation is correct.
+- Hybrid mode adds **+4.8 R@5** over pure BM25 with no code changes — just
+  set `MEM_EMBEDDINGS_*` and `LME_MODE=hybrid`. The biggest wins are on
+  preference (+10.0), knowledge-update (+9.0), and temporal-reasoning (+8.3).
+- The remaining gap to MemPalace (96.6%) is mostly model quality + chunking.
+  We truncate drawer text to 1500 chars (cloud.ru constraint), and
+  full-scan vector search adds 370ms/query.
 
 ### Chunking strategy (important)
 

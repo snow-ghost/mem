@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/snow-ghost/mem/internal/config"
+	"github.com/snow-ghost/mem/internal/embeddings"
 	"github.com/snow-ghost/mem/internal/palace"
 	"github.com/snow-ghost/mem/internal/search"
 )
@@ -33,8 +34,25 @@ func main() {
 		dataFile = os.Args[1]
 	}
 
+	mode := os.Getenv("LME_MODE") // "" / "bm25" / "vector" / "hybrid"
+	if mode == "" {
+		mode = "bm25"
+	}
+
+	envCfg := config.Load()
+	useEmbeddings := mode == "vector" || mode == "hybrid"
+	if useEmbeddings && !envCfg.EmbeddingsEnabled() {
+		fmt.Fprintln(os.Stderr, "LME_MODE=vector|hybrid requires MEM_EMBEDDINGS_URL and MEM_EMBEDDINGS_MODEL")
+		os.Exit(1)
+	}
+
 	fmt.Println("=== LongMemEval Benchmark for mem ===")
-	fmt.Printf("Dataset: %s\n\n", dataFile)
+	fmt.Printf("Dataset: %s\n", dataFile)
+	fmt.Printf("Mode: %s\n", mode)
+	if useEmbeddings {
+		fmt.Printf("Embeddings: %s\n", envCfg.EmbeddingsModel)
+	}
+	fmt.Println()
 
 	data, err := os.ReadFile(dataFile)
 	if err != nil {
@@ -88,12 +106,47 @@ func main() {
 		}
 	}
 
-	// Batch index all drawers
+	// Batch index all drawers (BM25)
 	search.IndexBatch(d, batchItems)
-
 	indexDuration := time.Since(indexStart)
 	fmt.Printf(" done\n")
-	fmt.Printf("Sessions: %d, Drawers indexed: %d, Time: %s\n\n", totalSessions, totalDrawers, indexDuration.Round(time.Millisecond))
+	fmt.Printf("Sessions: %d, Drawers indexed: %d, BM25 index time: %s\n",
+		totalSessions, totalDrawers, indexDuration.Round(time.Millisecond))
+
+	// Optional: compute embeddings for all drawers and store as blobs.
+	var embedClient *embeddings.Client
+	var embedIndexDuration time.Duration
+	if useEmbeddings {
+		embedClient = embeddings.NewClient(envCfg)
+		embStart := time.Now()
+		fmt.Printf("Embedding %d drawers (8 workers, batch 4, truncated 1500)...\n", len(batchItems))
+		texts := make([]string, len(batchItems))
+		for i, b := range batchItems {
+			texts[i] = truncateForEmbedding(b.Content, 1500)
+		}
+		progress := func(done, total int) {
+			fmt.Printf("\r  drawers: %d/%d (%.1f%%) elapsed=%s",
+				done, total, float64(done)/float64(total)*100,
+				time.Since(embStart).Round(time.Second))
+		}
+		vecs, failed, err := embedClient.EmbedAll(texts, 4, 8, progress)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "\nembed drawers: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println()
+		stored := 0
+		for i, v := range vecs {
+			if v != nil {
+				search.IndexEmbedding(d, batchItems[i].ID, embeddings.Encode(v))
+				stored++
+			}
+		}
+		embedIndexDuration = time.Since(embStart)
+		fmt.Printf("Embedding done in %s (stored %d, failed %d)\n",
+			embedIndexDuration.Round(time.Millisecond), stored, failed)
+	}
+	fmt.Println()
 
 	// Phase 2: Run retrieval benchmark
 	fmt.Println("Running retrieval...")
@@ -102,9 +155,53 @@ func main() {
 	var hit1, hit5, hit10 int
 	typeHits := make(map[string][2]int) // [hits@5, total]
 
+	// For vector/hybrid we batch-embed all queries up front using the same
+	// concurrent helper (8 workers).
+	var queryVecs map[string][]float32
+	if useEmbeddings {
+		fmt.Printf("Embedding %d queries (8 workers, batch 4)...\n", len(questions))
+		qStart := time.Now()
+		texts := make([]string, len(questions))
+		for i, q := range questions {
+			texts[i] = q.Question
+		}
+		progress := func(done, total int) {
+			fmt.Printf("\r  queries: %d/%d (%.1f%%) elapsed=%s",
+				done, total, float64(done)/float64(total)*100,
+				time.Since(qStart).Round(time.Second))
+		}
+		vecs, qFailed, err := embedClient.EmbedAll(texts, 4, 8, progress)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "\nembed queries: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println()
+		queryVecs = make(map[string][]float32, len(vecs))
+		stored := 0
+		for i, v := range vecs {
+			if v != nil {
+				queryVecs[questions[i].ID] = v
+				stored++
+			}
+		}
+		fmt.Printf("Query embedding done in %s (stored %d, failed %d, fallback to BM25)\n",
+			time.Since(qStart).Round(time.Millisecond), stored, qFailed)
+	}
+
 	for _, q := range questions {
 		answerText := normalizeAnswer(q.Answer)
-		results, _ := search.Search(d, q.Question, 0, 0, 10)
+		var results []search.SearchResult
+		qvec := queryVecs[q.ID]
+		switch {
+		case mode == "vector" && qvec != nil:
+			results, _ = search.SearchVector(d, qvec, 0, 0, 10)
+		case mode == "hybrid" && qvec != nil:
+			results, _ = search.SearchHybrid(d, q.Question, qvec, 0, 0, 10)
+		default:
+			// Falls back to pure BM25 when embedding mode is off OR
+			// when query vector is missing (failed to embed).
+			results, _ = search.Search(d, q.Question, 0, 0, 10)
+		}
 
 		found5, found10 := false, false
 		for i, r := range results {
@@ -152,14 +249,27 @@ func main() {
 	}
 
 	fmt.Printf("\n=== COMPARISON ===\n")
-	fmt.Printf("  %-25s R@5: %.1f%%\n", "mem (BM25, this run)", float64(hit5)/float64(total)*100)
-	fmt.Printf("  %-25s R@5: 96.6%%\n", "MemPalace (ChromaDB)")
-	fmt.Printf("  %-25s R@5: ~85%%\n", "Mem0")
-	fmt.Printf("  %-25s R@5: ~85%%\n", "Zep")
-	fmt.Printf("  %-25s R@5: ~70%%\n", "BM25 (flat, no structure)")
+	fmt.Printf("  %-30s R@5: %.1f%%\n", fmt.Sprintf("mem (%s, this run)", mode), float64(hit5)/float64(total)*100)
+	fmt.Printf("  %-30s R@5: 96.6%%\n", "MemPalace (ChromaDB)")
+	fmt.Printf("  %-30s R@5: ~85%%\n", "Mem0")
+	fmt.Printf("  %-30s R@5: ~85%%\n", "Zep")
+	fmt.Printf("  %-30s R@5: ~70%%\n", "BM25 (flat, no structure)")
+	if useEmbeddings {
+		fmt.Printf("\nEmbedding index time: %s\n", embedIndexDuration.Round(time.Millisecond))
+	}
 
 	d.Close()
 	os.RemoveAll(palacePath)
+}
+
+// truncateForEmbedding caps text at maxChars to fit comfortably under
+// the bge-m3 8K-token context (≈ 4 chars per token average) and avoid
+// server-side timeouts on overly long inputs.
+func truncateForEmbedding(text string, maxChars int) string {
+	if len(text) <= maxChars {
+		return text
+	}
+	return text[:maxChars]
 }
 
 func normalizeAnswer(answer any) string {

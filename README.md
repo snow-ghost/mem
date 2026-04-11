@@ -168,16 +168,17 @@ for reproduction steps.
 
 ### LongMemEval (ICLR 2025) — 500 questions, 6 question types
 
-| Metric | Value |
-|---|---|
-| **Recall@5** | **69.4%** |
-| Recall@10 | 78.4% |
-| Full run | ~31s |
-| Avg query latency | 7.1 ms |
+| Metric | BM25 (offline) | Hybrid (BM25 + bge-m3) |
+|---|---:|---:|
+| **Recall@5** | **69.4%** | **74.2%** |
+| Recall@1 | 45.6% | 51.2% |
+| Recall@10 | 78.4% | 79.4% |
+| Avg query latency | 7.1 ms | 377 ms |
 
-Matches the published BM25 baseline (~70%), confirming correct implementation.
-Semantic-embedding systems (MemPalace at 96.6%, Mem0/Zep at ~85%) need a model
-in the loop; `mem` achieves this with pure BM25.
+Pure BM25 matches the published BM25 baseline (~70%), confirming the
+implementation is correct. Hybrid mode (BM25 + cosine fused via Reciprocal
+Rank Fusion) adds **+4.8 R@5** with `BAAI/bge-m3` — biggest wins on
+preference (+10.0), knowledge-update (+9.0), temporal-reasoning (+8.3).
 
 ### LoCoMo (Snap Research) — 10 long-form conversations, 1986 QAs
 

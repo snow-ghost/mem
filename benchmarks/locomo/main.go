@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/snow-ghost/mem/internal/config"
+	"github.com/snow-ghost/mem/internal/embeddings"
 	"github.com/snow-ghost/mem/internal/palace"
 	"github.com/snow-ghost/mem/internal/search"
 )
@@ -50,8 +51,24 @@ func main() {
 		dataFile = os.Args[1]
 	}
 
+	mode := os.Getenv("LOCOMO_MODE")
+	if mode == "" {
+		mode = "bm25"
+	}
+	envCfg := config.Load()
+	useEmbeddings := mode == "vector" || mode == "hybrid"
+	if useEmbeddings && !envCfg.EmbeddingsEnabled() {
+		fmt.Fprintln(os.Stderr, "LOCOMO_MODE=vector|hybrid requires MEM_EMBEDDINGS_URL and MEM_EMBEDDINGS_MODEL")
+		os.Exit(1)
+	}
+
 	fmt.Println("=== LoCoMo Benchmark for mem ===")
-	fmt.Printf("Dataset: %s\n\n", dataFile)
+	fmt.Printf("Dataset: %s\n", dataFile)
+	fmt.Printf("Mode: %s\n", mode)
+	if useEmbeddings {
+		fmt.Printf("Embeddings: %s\n", envCfg.EmbeddingsModel)
+	}
+	fmt.Println()
 
 	data, err := os.ReadFile(dataFile)
 	if err != nil {
@@ -155,6 +172,42 @@ func main() {
 		totalMessages += msgCount
 		totalDrawers += len(batchItems)
 
+		// Embed drawers + queries when in vector/hybrid mode
+		var queryVecs map[string][]float32
+		if useEmbeddings {
+			client := embeddings.NewClient(envCfg)
+			texts := make([]string, len(batchItems))
+			for i, b := range batchItems {
+				texts[i] = b.Content
+			}
+			vecs, _, err := client.EmbedAll(texts, 4, 8, nil)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "embed drawers: %v\n", err)
+				os.Exit(1)
+			}
+			for i, v := range vecs {
+				if v != nil {
+					search.IndexEmbedding(d, batchItems[i].ID, embeddings.Encode(v))
+				}
+			}
+
+			qTexts := make([]string, len(conv.QA))
+			for i, qa := range conv.QA {
+				qTexts[i] = qa.Question
+			}
+			qVecs, _, err := client.EmbedAll(qTexts, 4, 8, nil)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "embed queries: %v\n", err)
+				os.Exit(1)
+			}
+			queryVecs = make(map[string][]float32, len(qVecs))
+			for i, v := range qVecs {
+				if v != nil {
+					queryVecs[conv.QA[i].Question] = v
+				}
+			}
+		}
+
 		// Run QAs
 		searchStart := time.Now()
 		for _, qa := range conv.QA {
@@ -165,7 +218,16 @@ func main() {
 			}
 			totalQA++
 
-			results, _ := search.Search(d, qa.Question, 0, 0, 10)
+			var results []search.SearchResult
+			qvec := queryVecs[qa.Question]
+			switch {
+			case mode == "vector" && qvec != nil:
+				results, _ = search.SearchVector(d, qvec, 0, 0, 10)
+			case mode == "hybrid" && qvec != nil:
+				results, _ = search.SearchHybrid(d, qa.Question, qvec, 0, 0, 10)
+			default:
+				results, _ = search.Search(d, qa.Question, 0, 0, 10)
+			}
 
 			evSet := make(map[string]bool)
 			for _, e := range qa.Evidence {
