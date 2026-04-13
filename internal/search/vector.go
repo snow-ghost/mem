@@ -67,17 +67,33 @@ func SearchVector(d *db.DB, queryVec []float32, wingID, roomID int64, limit int)
 
 // SearchHybrid combines BM25 and vector results using Reciprocal Rank Fusion
 // (RRF) with k=60 — the standard constant from the original RRF paper.
+// Equivalent to SearchHybridWeighted with bm25Weight=0.5.
+func SearchHybrid(d *db.DB, query string, queryVec []float32, wingID, roomID int64, limit int) ([]SearchResult, error) {
+	return SearchHybridWeighted(d, query, queryVec, wingID, roomID, limit, 0.5)
+}
+
+// SearchHybridWeighted is RRF with adjustable BM25 weight in [0, 1].
+// The vector contribution is weighted (1 - bm25Weight). Setting bm25Weight=1
+// degenerates to BM25-only ranking, 0 to vector-only.
 //
-//	rrf(d) = sum_over_systems( 1 / (k + rank_in_system(d)) )
+//	rrf(d) = bm25Weight / (k + bm25_rank(d))
+//	       + (1-bm25Weight) / (k + vec_rank(d))
 //
 // Drawers missing from one system contribute 0 from that system. We widen the
 // per-system candidate pool to 4*limit to give RRF enough material to work with.
-func SearchHybrid(d *db.DB, query string, queryVec []float32, wingID, roomID int64, limit int) ([]SearchResult, error) {
+func SearchHybridWeighted(d *db.DB, query string, queryVec []float32, wingID, roomID int64, limit int, bm25Weight float64) ([]SearchResult, error) {
 	if limit <= 0 {
 		limit = 5
 	}
+	if bm25Weight < 0 {
+		bm25Weight = 0
+	}
+	if bm25Weight > 1 {
+		bm25Weight = 1
+	}
 	pool := limit * 4
 	const k = 60.0
+	vecWeight := 1.0 - bm25Weight
 
 	bm25Results, err := Search(d, query, wingID, roomID, pool)
 	if err != nil {
@@ -92,10 +108,10 @@ func SearchHybrid(d *db.DB, query string, queryVec []float32, wingID, roomID int
 	for rank, r := range bm25Results {
 		copy := r
 		fused[r.DrawerID] = &copy
-		fused[r.DrawerID].Score = 1.0 / (k + float64(rank+1))
+		fused[r.DrawerID].Score = bm25Weight / (k + float64(rank+1))
 	}
 	for rank, r := range vecResults {
-		score := 1.0 / (k + float64(rank+1))
+		score := vecWeight / (k + float64(rank+1))
 		if existing, ok := fused[r.DrawerID]; ok {
 			existing.Score += score
 		} else {

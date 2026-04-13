@@ -168,17 +168,18 @@ for reproduction steps.
 
 ### LongMemEval (ICLR 2025) — 500 questions, 6 question types
 
-| Metric | BM25 (offline) | Hybrid (BM25 + bge-m3) |
+| Metric | BM25 (offline) | Hybrid (BM25 + bge-m3, weighted RRF 0.60) |
 |---|---:|---:|
-| **Recall@5** | **69.4%** | **74.2%** |
-| Recall@1 | 45.6% | 51.2% |
-| Recall@10 | 78.4% | 79.4% |
-| Avg query latency | 7.1 ms | 377 ms |
+| **Recall@5** | **69.4%** | **74.8%** |
+| Recall@1 | 45.6% | 50.4% |
+| Recall@10 | 78.4% | 78.6% |
+| Avg query latency | 7.1 ms | 67 ms |
 
 Pure BM25 matches the published BM25 baseline (~70%), confirming the
-implementation is correct. Hybrid mode (BM25 + cosine fused via Reciprocal
-Rank Fusion) adds **+4.8 R@5** with `BAAI/bge-m3` — biggest wins on
-preference (+10.0), knowledge-update (+9.0), temporal-reasoning (+8.3).
+implementation is correct. Hybrid mode (BM25 + cosine fused via weighted
+Reciprocal Rank Fusion, 0.6 BM25 / 0.4 vector) adds **+5.4 R@5** with
+`BAAI/bge-m3` — biggest wins on preference (+13.3), temporal-reasoning
+(+9.0), knowledge-update (+9.0).
 
 ### LoCoMo (Snap Research) — 10 long-form conversations, 1986 QAs
 

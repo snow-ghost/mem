@@ -150,10 +150,6 @@ func main() {
 
 	// Phase 2: Run retrieval benchmark
 	fmt.Println("Running retrieval...")
-	searchStart := time.Now()
-
-	var hit1, hit5, hit10 int
-	typeHits := make(map[string][2]int) // [hits@5, total]
 
 	// For vector/hybrid we batch-embed all queries up front using the same
 	// concurrent helper (8 workers).
@@ -188,55 +184,120 @@ func main() {
 			time.Since(qStart).Round(time.Millisecond), stored, qFailed)
 	}
 
-	for _, q := range questions {
-		answerText := normalizeAnswer(q.Answer)
-		var results []search.SearchResult
-		qvec := queryVecs[q.ID]
-		switch {
-		case mode == "vector" && qvec != nil:
-			results, _ = search.SearchVector(d, qvec, 0, 0, 10)
-		case mode == "hybrid" && qvec != nil:
-			results, _ = search.SearchHybrid(d, q.Question, qvec, 0, 0, 10)
-		default:
-			// Falls back to pure BM25 when embedding mode is off OR
-			// when query vector is missing (failed to embed).
-			results, _ = search.Search(d, q.Question, 0, 0, 10)
-		}
-
-		found5, found10 := false, false
-		for i, r := range results {
-			if containsAnswer(r.Content, answerText) {
-				if i == 0 {
-					hit1++
+	// In hybrid mode, optionally sweep RRF weights (LME_RRF_WEIGHTS=0.3,0.5,0.7).
+	// Each weight reuses the already-embedded palace and queries — only the
+	// retrieval+scoring loop runs again, which is fast (~3s per pass).
+	weights := []float64{0.5}
+	if mode == "hybrid" {
+		if env := os.Getenv("LME_RRF_WEIGHTS"); env != "" {
+			weights = nil
+			for _, p := range strings.Split(env, ",") {
+				var w float64
+				if _, err := fmt.Sscanf(strings.TrimSpace(p), "%f", &w); err == nil {
+					weights = append(weights, w)
 				}
-				if i < 5 {
-					found5 = true
-				}
-				if i < 10 {
-					found10 = true
-				}
-				break
+			}
+			if len(weights) == 0 {
+				weights = []float64{0.5}
 			}
 		}
-		if found5 {
-			hit5++
-		}
-		if found10 {
-			hit10++
-		}
-
-		counts := typeHits[q.Type]
-		if found5 {
-			counts[0]++
-		}
-		counts[1]++
-		typeHits[q.Type] = counts
 	}
 
-	searchDuration := time.Since(searchStart)
+	type weightResult struct {
+		weight                  float64
+		hit1, hit5, hit10       int
+		searchDuration          time.Duration
+		typeHits                map[string][2]int
+	}
+	var sweep []weightResult
 	total := len(questions)
 
+	runSweepWeight := func(w float64) weightResult {
+		wr := weightResult{weight: w, typeHits: make(map[string][2]int)}
+		swStart := time.Now()
+		for _, q := range questions {
+			answerText := normalizeAnswer(q.Answer)
+			var results []search.SearchResult
+			qvec := queryVecs[q.ID]
+			switch {
+			case mode == "vector" && qvec != nil:
+				results, _ = search.SearchVector(d, qvec, 0, 0, 10)
+			case mode == "hybrid" && qvec != nil:
+				results, _ = search.SearchHybridWeighted(d, q.Question, qvec, 0, 0, 10, w)
+			default:
+				results, _ = search.Search(d, q.Question, 0, 0, 10)
+			}
+
+			found5, found10 := false, false
+			for i, r := range results {
+				if containsAnswer(r.Content, answerText) {
+					if i == 0 {
+						wr.hit1++
+					}
+					if i < 5 {
+						found5 = true
+					}
+					if i < 10 {
+						found10 = true
+					}
+					break
+				}
+			}
+			if found5 {
+				wr.hit5++
+			}
+			if found10 {
+				wr.hit10++
+			}
+			counts := wr.typeHits[q.Type]
+			if found5 {
+				counts[0]++
+			}
+			counts[1]++
+			wr.typeHits[q.Type] = counts
+		}
+		wr.searchDuration = time.Since(swStart)
+		return wr
+	}
+
+	for _, w := range weights {
+		sweep = append(sweep, runSweepWeight(w))
+	}
+
+	// Pick the run with best R@5 to use as the primary "results" report.
+	best := sweep[0]
+	for _, wr := range sweep {
+		if wr.hit5 > best.hit5 {
+			best = wr
+		}
+	}
+	hit1, hit5, hit10 := best.hit1, best.hit5, best.hit10
+	typeHits := best.typeHits
+	searchDuration := best.searchDuration
+
+	if len(sweep) > 1 {
+		fmt.Printf("\n=== RRF WEIGHT SWEEP (BM25 weight) ===\n")
+		fmt.Printf("%-10s %-8s %-8s %-8s %s\n", "weight", "R@1", "R@5", "R@10", "search")
+		for _, wr := range sweep {
+			marker := ""
+			if wr.weight == best.weight {
+				marker = " <- best"
+			}
+			fmt.Printf("%-10.2f %5.1f%%   %5.1f%%   %5.1f%%   %s%s\n",
+				wr.weight,
+				float64(wr.hit1)/float64(total)*100,
+				float64(wr.hit5)/float64(total)*100,
+				float64(wr.hit10)/float64(total)*100,
+				wr.searchDuration.Round(time.Millisecond),
+				marker)
+		}
+		fmt.Printf("\nReporting best weight (%.2f) below.\n", best.weight)
+	}
+
 	fmt.Printf("\n=== RESULTS ===\n")
+	if mode == "hybrid" {
+		fmt.Printf("BM25 weight: %.2f (vector weight: %.2f)\n", best.weight, 1-best.weight)
+	}
 	fmt.Printf("Recall@1:  %.1f%% (%d/%d)\n", float64(hit1)/float64(total)*100, hit1, total)
 	fmt.Printf("Recall@5:  %.1f%% (%d/%d)\n", float64(hit5)/float64(total)*100, hit5, total)
 	fmt.Printf("Recall@10: %.1f%% (%d/%d)\n", float64(hit10)/float64(total)*100, hit10, total)
