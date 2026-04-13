@@ -78,6 +78,13 @@ func main() {
 		}
 	}
 	lcacheMerge := os.Getenv("LME_LCACHE_MERGE") // "" (default weighted sum), "max"
+	// LME_LCACHE_BM25=<float> adds a BM25 session-score contribution to
+	// the L# Cache ranking. The BM25 half runs over the same 3 variants
+	// per session (L0/L1/L2 drawers) and takes the max rank per session.
+	lcacheBM25 := 0.0
+	if v := os.Getenv("LME_LCACHE_BM25"); v != "" {
+		fmt.Sscanf(v, "%f", &lcacheBM25)
+	}
 
 	fmt.Printf("Dataset: %s\n", dataFile)
 	fmt.Printf("Mode: %s\n", mode)
@@ -365,6 +372,9 @@ func main() {
 			case useLCache && qvec != nil:
 				results = lcacheSearch(d, qvec, lcacheSessions, candidateLimit,
 					lcacheW0, lcacheW1, lcacheW2, lcacheMerge)
+				if lcacheBM25 > 0 {
+					results = lcacheBlendWithBM25(d, q.Question, results, lcacheBM25, candidateLimit)
+				}
 			case mode == "vector" && qvec != nil:
 				results, _ = search.SearchVector(d, qvec, 0, 0, candidateLimit)
 			case mode == "hybrid" && qvec != nil:
@@ -784,6 +794,80 @@ func lcacheSearch(d *db.DB, qvec []float32, lcacheSessionsByID map[string]*sessi
 type sessionVariants struct {
 	sessionID  string
 	l0, l1, l2 string
+}
+
+// lcacheBlendWithBM25 combines L# Cache vector session scores with a
+// BM25 session score (max over the 3 variants). The blended score is
+//
+//	final = (1 - w) * vector_score + w * bm25_norm_score
+//
+// where bm25_norm_score is the BM25 RRF contribution 1/(60+rank) so
+// it's on a comparable scale to cosine similarity. Returns top-limit
+// sessions sorted by the blended score. Useful when lexical overlap
+// with rare terms matters (personal names, numbers, specific places).
+func lcacheBlendWithBM25(d *db.DB, query string, vecResults []search.SearchResult,
+	w float64, limit int) []search.SearchResult {
+	if w <= 0 || len(vecResults) == 0 {
+		return vecResults
+	}
+	// Keep vector scores indexed by session
+	vecBySession := make(map[string]search.SearchResult, len(vecResults))
+	for _, r := range vecResults {
+		if _, ok := vecBySession[r.SourceFile]; !ok {
+			vecBySession[r.SourceFile] = r
+		}
+	}
+	// Run BM25 over all variants (3× drawers per session); dedupe by session
+	bm25, err := search.Search(d, query, 0, 0, limit*3)
+	if err != nil {
+		return vecResults
+	}
+	bm25BySession := make(map[string]float64)
+	for rank, r := range bm25 {
+		if _, seen := bm25BySession[r.SourceFile]; seen {
+			continue
+		}
+		bm25BySession[r.SourceFile] = 1.0 / (60.0 + float64(rank+1))
+	}
+
+	// Blend
+	union := make(map[string]bool, len(vecBySession)+len(bm25BySession))
+	for k := range vecBySession {
+		union[k] = true
+	}
+	for k := range bm25BySession {
+		union[k] = true
+	}
+
+	type scored struct {
+		r     search.SearchResult
+		score float64
+	}
+	var ranked []scored
+	for sid := range union {
+		vec, hasVec := vecBySession[sid]
+		var base search.SearchResult
+		var vecScore float64
+		if hasVec {
+			base = vec
+			vecScore = vec.Score
+		} else {
+			base = search.SearchResult{SourceFile: sid, Score: 0}
+		}
+		bm25s := bm25BySession[sid]
+		final := (1.0-w)*vecScore + w*bm25s
+		base.Score = final
+		ranked = append(ranked, scored{base, final})
+	}
+	sort.Slice(ranked, func(i, j int) bool { return ranked[i].score > ranked[j].score })
+	if len(ranked) > limit {
+		ranked = ranked[:limit]
+	}
+	out := make([]search.SearchResult, len(ranked))
+	for i, r := range ranked {
+		out[i] = r.r
+	}
+	return out
 }
 
 // makeSessionVariants returns the three L# views of a session:

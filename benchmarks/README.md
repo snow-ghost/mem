@@ -234,6 +234,37 @@ top-N; here L# already covers R@5 77.2%, leaving little headroom.
 Remaining gap to MemPalace's 96.6% is most likely embedding-model
 driven (all-MiniLM-L6-v2 in their setup vs BAAI/bge-m3 here).
 
+##### L# Cache + BM25 blend (redundant)
+
+`LME_LCACHE_BM25=0.3` adds a BM25 session-score contribution (RRF
+1/(60+rank), max over the 3 variants) blended with the cosine score.
+R@5 77.0% — essentially unchanged from pure L# max (77.2%). BM25
+becomes redundant once L1 (user turns only) already gives lexical
+signal without assistant noise. Preference queries do get a small
+boost (+3.4 on that subset) because phrases like "recommend me X" are
+rare-term-heavy, but the aggregate is flat.
+
+### Full LongMemEval summary
+
+| Configuration | R@1 | R@5 | R@10 |
+|---|---:|---:|---:|
+| BM25 + stemming | 44.4% | 71.0% | 77.2% |
+| Hybrid (RRF 0.7) | 48.0% | 74.6% | 79.2% |
+| Hybrid + rerank all | 52.6% | 74.6% | 80.8% |
+| Hybrid + rerank classifier-gated | 48.4% | 75.2% | 81.6% |
+| Hybrid + rerank oracle-gated | 50.0% | 76.4% | 81.2% |
+| L# Cache weighted-sum | 53.0% | 74.4% | **82.4%** |
+| L# Cache max-merge | 54.2% | 77.2% | 81.8% |
+| L# Cache max + BM25 blend 0.3 | 54.6% | 77.0% | 81.8% |
+| **L# Cache max + oracle-gated rerank** | **55.0%** | **77.4%** | 82.0% |
+| _MemPalace (ChromaDB + MiniLM)_ | _?_ | _96.6%_ | _?_ |
+
+Gap to MemPalace shrank from 27.2 pp (starting BM25) to **19.2 pp**
+via technique work alone, on the same BAAI/bge-m3 embedding model.
+Closing the rest would need either the actual ChromaDB reference
+model (all-MiniLM-L6-v2 via llama.cpp locally) or an alternative
+bench run confirming the 96.6% figure isn't harness-specific.
+
 #### Cross-encoder reranking
 
 Set `MEM_RERANK_URL`, `MEM_RERANK_MODEL` (Cohere-compatible `/v1/rerank`,
