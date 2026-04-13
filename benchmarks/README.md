@@ -202,6 +202,38 @@ is the largest single-knob improvement after recency on ConvoMem.
 Override weights via `LME_LCACHE_WEIGHTS="0.5,0.3,0.2"`, switch to
 max-merge via `LME_LCACHE_MERGE=max`.
 
+##### Embedding model A/B: bge-m3 vs Qwen3-Embedding-0.6B (both 1024-dim)
+
+Same L# Cache max-merge pipeline, just swap `MEM_EMBEDDINGS_MODEL`:
+
+| | bge-m3 | Qwen3-Embedding-0.6B |
+|---|---:|---:|
+| R@1 | **54.2%** | 53.4% |
+| **R@5** | **77.2%** | 75.6% |
+| R@10 | 81.8% | **82.4%** |
+| Anchor classifier accuracy | 44.4% | **54.8%** |
+
+bge-m3 wins on R@1/R@5 by a small margin. Qwen3 wins on R@10 and on
+the per-type classification task (the anchor classifier's cosine
+similarities land in the right bucket more often). Workload-
+dependent — the retrieval-oriented user should prefer bge-m3 here,
+but this isn't a blanket statement about either model.
+
+##### L# Cache + oracle-gated rerank (near-ceiling combo)
+
+Stacking cross-encoder rerank on top of L# max-merge adds marginal
+gain — the first stage already got the right session into top-5:
+
+| Config | R@1 | R@5 | R@10 |
+|---|---:|---:|---:|
+| L# max | 54.2% | 77.2% | 81.8% |
+| L# max + oracle-gated rerank | **55.0%** | **77.4%** | 82.0% |
+
+Rerank helps only when the right session slipped past top-5 into
+top-N; here L# already covers R@5 77.2%, leaving little headroom.
+Remaining gap to MemPalace's 96.6% is most likely embedding-model
+driven (all-MiniLM-L6-v2 in their setup vs BAAI/bge-m3 here).
+
 #### Cross-encoder reranking
 
 Set `MEM_RERANK_URL`, `MEM_RERANK_MODEL` (Cohere-compatible `/v1/rerank`,
