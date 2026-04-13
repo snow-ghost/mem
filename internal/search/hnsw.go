@@ -193,6 +193,13 @@ func (h *HNSWIndex) Size() int {
 	return len(h.nodes)
 }
 
+// Dim returns the embedding dimensionality this index was built for.
+func (h *HNSWIndex) Dim() int {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.dim
+}
+
 // searchLayer (must hold lock). Returns up to `ef` candidate node ids.
 func (h *HNSWIndex) searchLayer(query []float32, entryPoints []int, ef int, layer int) []int {
 	visited := make(map[int]bool, ef*4)

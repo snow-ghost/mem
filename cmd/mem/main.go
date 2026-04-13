@@ -609,9 +609,11 @@ func runKG(args []string) int {
 func runReindex(args []string) int {
 	var palaceFlag string
 	var batchSize int
+	var hnswFlag bool
 	fs := flag.NewFlagSet("reindex", flag.ContinueOnError)
 	fs.StringVar(&palaceFlag, "palace", "", "override palace path")
 	fs.IntVar(&batchSize, "batch", 64, "embeddings batch size")
+	fs.BoolVar(&hnswFlag, "hnsw", false, "build the HNSW index after embedding (warm cache for fast search)")
 	fs.Parse(args)
 
 	cfg := config.Load()
@@ -667,6 +669,21 @@ func runReindex(args []string) int {
 
 	fmt.Printf("Reindex complete: %d new embeddings (was %d, now %d)\n",
 		embedded, alreadyDone, alreadyDone+embedded)
+
+	if hnswFlag {
+		hStart := time.Now()
+		idx, err := search.BuildHNSWFromPalace(d)
+		if err != nil || idx == nil {
+			fmt.Fprintf(os.Stderr, "mem: reindex: HNSW build: %v\n", err)
+			return 0
+		}
+		if err := search.SaveHNSWToCache(d, "default", idx); err != nil {
+			fmt.Fprintf(os.Stderr, "mem: reindex: HNSW save: %v\n", err)
+			return 0
+		}
+		fmt.Printf("HNSW cache built: %d vectors, dim=%d (%s)\n",
+			idx.Size(), idx.Dim(), time.Since(hStart).Round(time.Millisecond))
+	}
 	return 0
 }
 

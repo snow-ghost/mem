@@ -1,5 +1,8 @@
 # mem — Standalone Memory Palace for AI Agents
 
+[![Go](https://github.com/snow-ghost/mem/actions/workflows/go.yml/badge.svg)](https://github.com/snow-ghost/mem/actions/workflows/go.yml)
+[![Release](https://img.shields.io/github/v/release/snow-ghost/mem)](https://github.com/snow-ghost/mem/releases/latest)
+
 A **pure Go** memory palace system inspired by [MemPalace](https://github.com/milla-jovovich/mempalace),
 rewritten from scratch with zero Python dependencies. Single static binary, single SQLite file,
 no LLM required for core features.
