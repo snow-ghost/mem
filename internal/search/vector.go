@@ -145,6 +145,110 @@ func CountDrawersWithEmbeddings(d *db.DB) (int, error) {
 	return n, err
 }
 
+// BuildHNSWFromPalace loads every embedded drawer and inserts it into a
+// fresh HNSWIndex. Returns nil if no drawers have embeddings yet.
+// Caller decides when this is worth doing: at small scale (<5k drawers)
+// SearchVector's full scan is competitive with HNSW; at larger scale
+// HNSW gives ~5x speedup at 10k and ~25x at 50k (see hnsw_test.go).
+func BuildHNSWFromPalace(d *db.DB) (*HNSWIndex, error) {
+	rows, err := d.Query("SELECT id, embedding FROM drawers WHERE embedding IS NOT NULL ORDER BY id")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var idx *HNSWIndex
+	for rows.Next() {
+		var id int64
+		var blob []byte
+		if err := rows.Scan(&id, &blob); err != nil {
+			continue
+		}
+		vec, err := embeddings.Decode(blob)
+		if err != nil {
+			continue
+		}
+		if idx == nil {
+			idx = NewHNSWIndex(len(vec))
+		}
+		idx.Insert(id, vec)
+	}
+	return idx, nil
+}
+
+// SearchHNSW runs vector search via a pre-built HNSW index, returning
+// SearchResult entries hydrated from the database. Falls back to nil
+// if the index is empty. Each result's Score is the actual cosine
+// similarity (matches SearchVector for downstream comparison).
+func SearchHNSW(d *db.DB, idx *HNSWIndex, queryVec []float32, limit int) ([]SearchResult, error) {
+	if idx == nil || idx.Size() == 0 || len(queryVec) == 0 {
+		return nil, nil
+	}
+	if limit <= 0 {
+		limit = 5
+	}
+	ids := idx.Search(queryVec, limit, 0)
+	if len(ids) == 0 {
+		return nil, nil
+	}
+
+	// Hydrate each id, including the embedding so we can compute the
+	// real cosine score (HNSW orders by it but the index doesn't return
+	// the raw value).
+	placeholders := make([]string, len(ids))
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+	q := `SELECT d.id, d.content, d.wing_id, d.room_id, d.hall, d.source_file,
+		COALESCE(w.name, ''), COALESCE(rm.name, ''), d.embedding
+		FROM drawers d
+		LEFT JOIN wings w ON d.wing_id = w.id
+		LEFT JOIN rooms rm ON d.room_id = rm.id
+		WHERE d.id IN (` + joinComma(placeholders) + `)`
+	rows, err := d.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	byID := make(map[int64]SearchResult, len(ids))
+	for rows.Next() {
+		var sr SearchResult
+		var blob []byte
+		if err := rows.Scan(&sr.DrawerID, &sr.Content, &sr.WingID, &sr.RoomID,
+			&sr.Hall, &sr.SourceFile, &sr.WingName, &sr.RoomName, &blob); err != nil {
+			continue
+		}
+		if vec, err := embeddings.Decode(blob); err == nil {
+			sr.Score = float64(embeddings.Cosine(queryVec, vec))
+		}
+		byID[sr.DrawerID] = sr
+	}
+
+	// Preserve HNSW order (= approximate relevance order).
+	out := make([]SearchResult, 0, len(ids))
+	for _, id := range ids {
+		if sr, ok := byID[id]; ok {
+			out = append(out, sr)
+		}
+	}
+	return out, nil
+}
+
+func joinComma(parts []string) string {
+	out := ""
+	for i, p := range parts {
+		if i > 0 {
+			out += ","
+		}
+		out += p
+	}
+	return out
+}
+
+
 type DrawerContent struct {
 	ID      int64
 	Content string

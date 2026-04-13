@@ -137,6 +137,20 @@ For stronger top-1 results, also set `MEM_RERANK_URL` + `MEM_RERANK_MODEL`
 The MCP `mem_search` tool accepts a `mode` argument that selects between
 bm25, vector, and hybrid retrieval at call time.
 
+For very large palaces (>5k drawers with embeddings), pass `--hnsw` to
+`mem search --mode vector` to use a pure-Go HNSW index. Microbenchmarks
+on dim=128 random vectors:
+
+| Drawers | Full scan | HNSW | Speedup |
+|---:|---:|---:|---:|
+| 1k | 0.35 ms | 0.40 ms | (slower — HNSW overhead dominates) |
+| 10k | 2.99 ms | 0.56 ms | **5.3×** |
+| 50k | 17.96 ms | 0.75 ms | **24×** |
+
+The HNSW index is built lazily in memory from the SQLite blob column
+on each `mem search --hnsw` invocation; no extra persistence layer.
+Recall@10 on 1000 random vectors: 98.6%.
+
 ### Knowledge Graph
 
 Entity-relationship triples with temporal validity:
@@ -229,7 +243,8 @@ internal/
   config/              Configuration (env vars, paths)
   db/                  SQLite schema + connection
   palace/              Wings, rooms, drawers, tunnels
-  search/              BM25 + vector + hybrid (RRF) search, Porter stemmer
+  search/              BM25 + vector + hybrid (RRF) search, Porter stemmer,
+                       HNSW index, heuristic question classifier
   embeddings/          Optional OpenAI-compatible client + blob serializer
   rerank/              Optional Cohere-compatible cross-encoder client
   kg/                  Temporal knowledge graph + contradiction detection

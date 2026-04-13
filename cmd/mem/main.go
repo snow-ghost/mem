@@ -261,11 +261,13 @@ func runMine(args []string) int {
 func runSearch(args []string) int {
 	var wingFlag, roomFlag, modeFlag string
 	var limitFlag int
+	var hnswFlag bool
 	fs := flag.NewFlagSet("search", flag.ContinueOnError)
 	fs.StringVar(&wingFlag, "wing", "", "filter by wing")
 	fs.StringVar(&roomFlag, "room", "", "filter by room")
 	fs.StringVar(&modeFlag, "mode", "bm25", "search mode: bm25, vector, or hybrid")
 	fs.IntVar(&limitFlag, "limit", 5, "max results")
+	fs.BoolVar(&hnswFlag, "hnsw", false, "use HNSW index for vector search (faster on >5k drawers)")
 	var palaceFlag string
 	fs.StringVar(&palaceFlag, "palace", "", "override palace path")
 	fs.Parse(args)
@@ -319,7 +321,15 @@ func runSearch(args []string) int {
 			fmt.Fprintf(os.Stderr, "mem: search: embed query: %v\n", err)
 			return 1
 		}
-		if modeFlag == "vector" {
+		if hnswFlag && modeFlag == "vector" {
+			idx, ierr := search.BuildHNSWFromPalace(d)
+			if ierr != nil || idx == nil {
+				fmt.Fprintln(os.Stderr, "mem: search: HNSW build failed, falling back to full scan")
+				results, err = search.SearchVector(d, qvec, wingID, roomID, limitFlag)
+			} else {
+				results, err = search.SearchHNSW(d, idx, qvec, limitFlag)
+			}
+		} else if modeFlag == "vector" {
 			results, err = search.SearchVector(d, qvec, wingID, roomID, limitFlag)
 		} else {
 			results, err = search.SearchHybrid(d, query, qvec, wingID, roomID, limitFlag)
