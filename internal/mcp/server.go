@@ -9,6 +9,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/snow-ghost/mem/internal/config"
 	"github.com/snow-ghost/mem/internal/db"
+	"github.com/snow-ghost/mem/internal/embeddings"
 	"github.com/snow-ghost/mem/internal/kg"
 	"github.com/snow-ghost/mem/internal/layers"
 	"github.com/snow-ghost/mem/internal/palace"
@@ -23,13 +24,14 @@ func NewServer(d *db.DB, cfg config.Config) *mcp.Server {
 
 	s.AddTool(&mcp.Tool{
 		Name:        "mem_search",
-		Description: "Search memories in the palace.",
+		Description: "Search memories in the palace. Mode: bm25 (default), vector, or hybrid (requires MEM_EMBEDDINGS_*).",
 		InputSchema: jsonSchema(map[string]any{
 			"query": map[string]any{"type": "string", "description": "search query"},
 			"wing":  map[string]any{"type": "string", "description": "filter by wing"},
 			"room":  map[string]any{"type": "string", "description": "filter by room"},
+			"mode":  map[string]any{"type": "string", "description": "bm25 | vector | hybrid (default bm25)"},
 		}, []string{"query"}),
-	}, searchHandler(d))
+	}, searchHandler(d, cfg))
 
 	s.AddTool(&mcp.Tool{
 		Name:        "mem_add_drawer",
@@ -39,7 +41,7 @@ func NewServer(d *db.DB, cfg config.Config) *mcp.Server {
 			"wing":    map[string]any{"type": "string", "description": "wing name"},
 			"room":    map[string]any{"type": "string", "description": "room name"},
 		}, []string{"content", "wing"}),
-	}, addDrawerHandler(d))
+	}, addDrawerHandler(d, cfg))
 
 	s.AddTool(&mcp.Tool{
 		Name:        "mem_status",
@@ -120,7 +122,7 @@ func getArgs(req *mcp.CallToolRequest) map[string]string {
 	return result
 }
 
-func searchHandler(d *db.DB) mcp.ToolHandler {
+func searchHandler(d *db.DB, cfg config.Config) mcp.ToolHandler {
 	return func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		a := getArgs(req)
 		var wingID, roomID int64
@@ -134,7 +136,28 @@ func searchHandler(d *db.DB) mcp.ToolHandler {
 				roomID = r.ID
 			}
 		}
-		results, err := search.Search(d, a["query"], wingID, roomID, 5)
+
+		mode := a["mode"]
+		var results []search.SearchResult
+		var err error
+		switch mode {
+		case "vector", "hybrid":
+			if !cfg.EmbeddingsEnabled() {
+				return textResult("Error: vector/hybrid mode requires MEM_EMBEDDINGS_URL and MEM_EMBEDDINGS_MODEL"), nil
+			}
+			client := embeddings.NewClient(cfg)
+			qvec, embErr := client.Embed(a["query"])
+			if embErr != nil {
+				return textResult(fmt.Sprintf("Error embedding query: %v", embErr)), nil
+			}
+			if mode == "vector" {
+				results, err = search.SearchVector(d, qvec, wingID, roomID, 5)
+			} else {
+				results, err = search.SearchHybrid(d, a["query"], qvec, wingID, roomID, 5)
+			}
+		default:
+			results, err = search.Search(d, a["query"], wingID, roomID, 5)
+		}
 		if err != nil {
 			return textResult(fmt.Sprintf("Error: %v", err)), nil
 		}
@@ -149,7 +172,7 @@ func searchHandler(d *db.DB) mcp.ToolHandler {
 	}
 }
 
-func addDrawerHandler(d *db.DB) mcp.ToolHandler {
+func addDrawerHandler(d *db.DB, cfg config.Config) mcp.ToolHandler {
 	return func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		a := getArgs(req)
 		roomName := a["room"]
@@ -163,6 +186,17 @@ func addDrawerHandler(d *db.DB) mcp.ToolHandler {
 			return textResult("Duplicate"), nil
 		}
 		search.IndexDrawer(d, drawer.ID, a["content"])
+
+		// Auto-embed if configured. Failure is non-fatal — the drawer is
+		// still stored and BM25-indexed; embedding can be retried via
+		// `mem reindex`.
+		if cfg.EmbeddingsEnabled() {
+			client := embeddings.NewClient(cfg)
+			if vec, err := client.Embed(a["content"]); err == nil {
+				search.IndexEmbedding(d, drawer.ID, embeddings.Encode(vec))
+			}
+		}
+
 		return textResult(fmt.Sprintf("Stored in %s/%s (#%d)", a["wing"], roomName, drawer.ID)), nil
 	}
 }

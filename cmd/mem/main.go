@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/snow-ghost/mem/internal/config"
@@ -118,9 +119,11 @@ func runStatus(args []string) int {
 
 func runMine(args []string) int {
 	var wingFlag, modeFlag string
+	var noEmbed bool
 	fs := flag.NewFlagSet("mine", flag.ContinueOnError)
 	fs.StringVar(&wingFlag, "wing", "", "wing name")
 	fs.StringVar(&modeFlag, "mode", "files", "mining mode: files or convos")
+	fs.BoolVar(&noEmbed, "no-embed", false, "skip embedding new drawers even if MEM_EMBEDDINGS_* is set")
 	var palaceFlag string
 	fs.StringVar(&palaceFlag, "palace", "", "override palace path")
 	fs.Parse(args)
@@ -225,6 +228,33 @@ func runMine(args []string) int {
 	fmt.Printf("  Files processed: %d\n", filesProcessed)
 	fmt.Printf("  Drawers created: %d\n", drawersCreated)
 	fmt.Printf("  Duplicates skipped: %d\n", duplicatesSkipped)
+
+	// Auto-embed new drawers if an embeddings provider is configured.
+	// Skip with --no-embed to keep mining offline.
+	if !noEmbed && cfg.EmbeddingsEnabled() && len(toIndex) > 0 {
+		client := embeddings.NewClient(cfg)
+		texts := make([]string, len(toIndex))
+		for i, p := range toIndex {
+			texts[i] = p.Content
+		}
+		fmt.Printf("  Embedding %d new drawers (model: %s)...\n", len(toIndex), cfg.EmbeddingsModel)
+		start := time.Now()
+		vecs, failed, err := client.EmbedAll(texts, 4, 8, nil)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "mem: mine: embed: %v\n", err)
+			return 0 // Mining still succeeded; embedding can be retried via `mem reindex`.
+		}
+		stored := 0
+		for i, v := range vecs {
+			if v != nil {
+				if err := search.IndexEmbedding(d, toIndex[i].ID, embeddings.Encode(v)); err == nil {
+					stored++
+				}
+			}
+		}
+		fmt.Printf("  Embedded: %d (failed: %d) in %s\n",
+			stored, failed, time.Since(start).Round(time.Millisecond))
+	}
 	return 0
 }
 

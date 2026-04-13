@@ -83,8 +83,15 @@ mem status
 export MEM_EMBEDDINGS_URL=https://api.openai.com/v1/embeddings
 export MEM_EMBEDDINGS_MODEL=text-embedding-3-small
 export MEM_EMBEDDINGS_API_KEY=sk-...
-mem reindex                            # compute embeddings for all drawers
-mem search "auth decision" --mode hybrid
+# `mem mine` now auto-embeds new drawers; `mem reindex` covers older ones.
+mem mine ~/projects/myapp --wing myapp        # auto-embeds new drawers
+mem reindex                                    # one-shot for older drawers
+mem search "auth decision" --mode hybrid       # BM25 + cosine via RRF
+# (use --no-embed on `mem mine` to skip the embedding step)
+
+# Optional: cross-encoder reranking on top of hybrid for stronger top-1
+export MEM_RERANK_URL=https://your-endpoint/v1/rerank
+export MEM_RERANK_MODEL=BAAI/bge-reranker-v2-m3
 
 # Start MCP server (for Claude Code integration)
 mem mcp
@@ -117,11 +124,18 @@ No vector embeddings required for the default mode — **everything works offlin
 Set `MEM_EMBEDDINGS_URL` + `MEM_EMBEDDINGS_MODEL` (+ `MEM_EMBEDDINGS_API_KEY`)
 pointing at any OpenAI-compatible `/v1/embeddings` endpoint — OpenAI, Voyage AI,
 Cohere (compat mode), Together, Ollama, LM Studio, LocalAI, llama.cpp server.
-Then `mem reindex` computes and stores dense vectors, and `mem search --mode
-hybrid` fuses BM25 + cosine similarity via Reciprocal Rank Fusion (k=60). Pure
-vector search (`--mode vector`) is also available. Embeddings are stored as
-BLOBs in the same SQLite file — no second database. The entire feature is
+Once set, `mem mine` automatically embeds new drawers as it ingests them
+(opt out with `--no-embed`). `mem reindex` covers any older drawers that
+predate the embeddings provider. `mem search --mode hybrid` fuses BM25 +
+cosine similarity via weighted Reciprocal Rank Fusion (k=60). Pure vector
+search (`--mode vector`) is also available. Embeddings are stored as BLOBs
+in the same SQLite file — no second database. The entire feature is
 optional; unset vars = BM25-only behavior unchanged.
+
+For stronger top-1 results, also set `MEM_RERANK_URL` + `MEM_RERANK_MODEL`
+(Cohere-compatible `/v1/rerank` endpoint, e.g. `BAAI/bge-reranker-v2-m3`).
+The MCP `mem_search` tool accepts a `mode` argument that selects between
+bm25, vector, and hybrid retrieval at call time.
 
 ### Knowledge Graph
 
