@@ -124,6 +124,24 @@ weight is *worse* than the global default. Net classifier-driven is
 real (LLM-based or embedding-anchored) classifier to plug in:
 `search.SearchHybridAuto(..., DefaultPerTypeWeights)`.
 
+We also tested an embedding-anchor classifier
+(`search.AnchorClassifier`) that cosine-compares the query embedding
+to per-type prototypical phrasings:
+
+| Classifier | Accuracy | Per-type R@5 estimate |
+|---|---:|---:|
+| Heuristic regex | 53.4% | 74.2% |
+| Anchor (bge-m3) | 44.4% | 74.0% |
+| Single best (0.7) baseline | — | 74.6% |
+| Oracle per-type (upper bound) | 100% | 75.4% |
+
+The anchor classifier loses to the heuristic because LongMemEval
+question types are deliberately phrased to be lexically similar
+(knowledge-update queries are indistinguishable from single-session-
+user queries by topic). Both classifiers are an honest "-0.5 pp"
+result; the path forward is either labeled training data or LLM-based
+classification, both out of scope here.
+
 #### RRF weight sweep with stemming
 
 | Weight | R@1 | R@5 | R@10 |
@@ -381,8 +399,38 @@ harder regime is 50–300 conversations with `changing_evidence` (latest-value
 tracking), which BM25 cannot solve without temporal signals. Running that
 level would require downloading the ≥100MB batches.
 
+### ConvoMem changing_evidence (the hard mode)
+
+`changing_evidence` test cases hold *multiple* versions of the same fact
+across conversations (e.g., "campaign targets US" → "campaign targets US
+and Canada"). The correct retrieval is the **latest** version. We
+download three batches (2/3/4 evidence items per case = 1290 tests
+total) and report two metrics:
+
+- **lenient**: any conv with `containsEvidence=true` counts as a hit
+- **strict**: only the *latest* such conv counts (the canonical answer)
+
+Results on BM25 only:
+
+| Context size | Lenient R@1 | **Strict R@1** | Strict R@5 | Strict R@10 | N |
+|---:|---:|---:|---:|---:|---:|
+| 2 | 100% | 24.8% | 99.5% | 99.5% | 759 |
+| 3 | 100% | 31.4% | 99.7% | 99.7% | 344 |
+| 4 | 100% | 21.9% | 100% | 100% | 187 |
+| **Total** | **100%** | **26.1%** | **99.6%** | **99.6%** | **1290** |
+
+This is the real hard mode: BM25 retrieves every version into top-5 but
+picks the *latest* version at #1 only 26% of the time. The metric
+exactly captures what's challenging about changing facts. To reach R@1
+parity with R@5 here you'd need temporal-aware ranking — currently out
+of scope for `mem`.
+
+A downstream LLM with a 5-doc context window would still see the latest
+evidence (R@5 99.6%) and could answer correctly with a "use latest"
+prompt — so the practical impact for RAG flows is muted.
+
 ## Future benchmarks
 
-- [ ] **ConvoMem changing_evidence** — latest-value tracking (BM25 alone should fail)
 - [ ] **ConvoMem at scale (50–300 convs)** — requires large batch downloads
+- [ ] **Temporal-aware ranking** — actually solve the changing_evidence R@1 gap
 - [ ] **MemoryBench** (Supermemory) — unified runner for cross-provider comparison

@@ -38,10 +38,11 @@ type TestCase struct {
 }
 
 type sizeMetrics struct {
-	hit1, hit5, hit10, total int
-	indexTime                time.Duration
-	searchTime               time.Duration
-	totalDrawers             int
+	hit1, hit5, hit10, total            int
+	strictHit1, strictHit5, strictHit10 int // "latest evidence conv only" — meaningful for changing_evidence
+	indexTime                           time.Duration
+	searchTime                          time.Duration
+	totalDrawers                        int
 }
 
 func main() {
@@ -107,13 +108,21 @@ func main() {
 			}
 			wing, _ := palace.CreateWing(d, "convomem", "benchmark", "")
 
-			// Build conv_id → containsEvidence map
+			// Build conv_id → containsEvidence map. For changing_evidence
+			// cases there are multiple containsEvidence=true conversations
+			// (each holds an older or newer version of the fact); the
+			// LATEST one is the canonical answer. We track both the full
+			// set and the last conv id so the bench can report a strict
+			// "latest only" hit alongside the lenient "any evidence conv".
 			evidenceConvs := make(map[string]bool)
+			var latestEvidence string
 			for _, c := range tc.Conversations {
 				if c.ContainsEvidence {
 					evidenceConvs[c.ID] = true
+					latestEvidence = c.ID
 				}
 			}
+			_ = latestEvidence // also used below in stricter accounting
 
 			indexStart := time.Now()
 			var batchItems []struct {
@@ -145,24 +154,45 @@ func main() {
 			m.indexTime += time.Since(indexStart)
 			m.totalDrawers += len(batchItems)
 
-			// Run all evidence questions for this test case
+			// Run all evidence questions for this test case. Two metrics:
+			//   - hit*       : any conv that has the evidence (lenient)
+			//   - strictHit* : only the LATEST evidence conv counts
+			//                  (correct metric for changing_evidence)
 			searchStart := time.Now()
 			for _, ev := range tc.EvidenceItems {
 				m.total++
 				results, _ := search.Search(d, ev.Question, 0, 0, 10)
 
+				lenientHit := -1
+				strictHit := -1
 				for i, r := range results {
-					if evidenceConvs[r.SourceFile] {
-						if i == 0 {
-							m.hit1++
-						}
-						if i < 5 {
-							m.hit5++
-						}
-						if i < 10 {
-							m.hit10++
-						}
-						break
+					if lenientHit < 0 && evidenceConvs[r.SourceFile] {
+						lenientHit = i
+					}
+					if strictHit < 0 && r.SourceFile == latestEvidence {
+						strictHit = i
+					}
+				}
+				if lenientHit >= 0 {
+					if lenientHit == 0 {
+						m.hit1++
+					}
+					if lenientHit < 5 {
+						m.hit5++
+					}
+					if lenientHit < 10 {
+						m.hit10++
+					}
+				}
+				if strictHit >= 0 {
+					if strictHit == 0 {
+						m.strictHit1++
+					}
+					if strictHit < 5 {
+						m.strictHit5++
+					}
+					if strictHit < 10 {
+						m.strictHit10++
 					}
 				}
 			}
@@ -181,11 +211,12 @@ func main() {
 	}
 	sort.Ints(sizes)
 
-	fmt.Printf("\n=== RESULTS BY CONTEXT SIZE ===\n")
+	fmt.Printf("\n=== RESULTS BY CONTEXT SIZE (lenient: any evidence conv) ===\n")
 	fmt.Printf("%-12s %-8s %-8s %-8s %-12s %-12s %s\n", "ContextSize", "R@1", "R@5", "R@10", "Index", "Search", "N")
 	fmt.Printf("%-12s %-8s %-8s %-8s %-12s %-12s %s\n", "-----------", "---", "---", "----", "-----", "------", "-")
 
 	var grandHit1, grandHit5, grandHit10, grandTotal int
+	var grandStrictHit1, grandStrictHit5, grandStrictHit10 int
 	var grandIndex, grandSearch time.Duration
 	for _, cs := range sizes {
 		m := metricsBySize[cs]
@@ -201,16 +232,35 @@ func main() {
 		grandHit1 += m.hit1
 		grandHit5 += m.hit5
 		grandHit10 += m.hit10
+		grandStrictHit1 += m.strictHit1
+		grandStrictHit5 += m.strictHit5
+		grandStrictHit10 += m.strictHit10
 		grandTotal += m.total
 		grandIndex += m.indexTime
 		grandSearch += m.searchTime
 	}
 
+	fmt.Printf("\n=== RESULTS BY CONTEXT SIZE (strict: latest evidence conv only) ===\n")
+	fmt.Printf("%-12s %-8s %-8s %-8s %s\n", "ContextSize", "R@1", "R@5", "R@10", "N")
+	for _, cs := range sizes {
+		m := metricsBySize[cs]
+		fmt.Printf("%-12d %5.1f%%  %5.1f%%  %5.1f%%  %d\n",
+			cs,
+			pct(m.strictHit1, m.total),
+			pct(m.strictHit5, m.total),
+			pct(m.strictHit10, m.total),
+			m.total,
+		)
+	}
+
 	fmt.Printf("\n=== TOTALS ===\n")
 	fmt.Printf("Total test cases: %d\n", grandTotal)
-	fmt.Printf("Recall@1:  %.1f%%\n", pct(grandHit1, grandTotal))
-	fmt.Printf("Recall@5:  %.1f%%\n", pct(grandHit5, grandTotal))
-	fmt.Printf("Recall@10: %.1f%%\n", pct(grandHit10, grandTotal))
+	fmt.Printf("Lenient (any evidence conv):\n")
+	fmt.Printf("  Recall@1:  %.1f%%   Recall@5: %.1f%%   Recall@10: %.1f%%\n",
+		pct(grandHit1, grandTotal), pct(grandHit5, grandTotal), pct(grandHit10, grandTotal))
+	fmt.Printf("Strict (latest evidence conv only — meaningful for changing_evidence):\n")
+	fmt.Printf("  Recall@1:  %.1f%%   Recall@5: %.1f%%   Recall@10: %.1f%%\n",
+		pct(grandStrictHit1, grandTotal), pct(grandStrictHit5, grandTotal), pct(grandStrictHit10, grandTotal))
 	fmt.Printf("Index time: %s\n", grandIndex.Round(time.Millisecond))
 	fmt.Printf("Search time: %s (avg: %s/query)\n",
 		grandSearch.Round(time.Millisecond),

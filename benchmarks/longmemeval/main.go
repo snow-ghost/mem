@@ -253,7 +253,7 @@ func main() {
 		"knowledge-update":   true,
 	}
 
-	// Track classifier accuracy on the way through (separate pass below)
+	// Track heuristic classifier accuracy on the way through.
 	classifierHits := 0
 	for _, q := range questions {
 		if string(search.ClassifyQuestion(q.Question)) == q.Type {
@@ -264,6 +264,33 @@ func main() {
 		fmt.Printf("Heuristic classifier accuracy: %.1f%% (%d/%d)\n",
 			float64(classifierHits)/float64(len(questions))*100,
 			classifierHits, len(questions))
+	}
+
+	// Also measure embedding-anchor classifier accuracy if embeddings are
+	// available — uses the same client and anchor texts. Each query's
+	// vector is already cached (queryVecs), so cost = one Prepare() call.
+	var anchorClf *search.AnchorClassifier
+	if useEmbeddings && embedClient != nil {
+		anchorClf = search.NewAnchorClassifier(embedClient.Embed)
+		if err := anchorClf.Prepare(); err != nil {
+			fmt.Fprintf(os.Stderr, "anchor prepare: %v\n", err)
+			anchorClf = nil
+		}
+	}
+	if anchorClf != nil {
+		anchorHits := 0
+		for _, q := range questions {
+			qvec := queryVecs[q.ID]
+			if qvec == nil {
+				continue
+			}
+			if string(anchorClf.Classify(qvec)) == q.Type {
+				anchorHits++
+			}
+		}
+		fmt.Printf("Anchor classifier accuracy:    %.1f%% (%d/%d)\n",
+			float64(anchorHits)/float64(len(questions))*100,
+			anchorHits, len(questions))
 	}
 
 	runSweepWeight := func(w float64) weightResult {
@@ -479,6 +506,22 @@ func main() {
 			}
 			conf[pred][q.Type]++
 		}
+		// Anchor-classifier confusion matrix (if available).
+		var anchorConf map[string]map[string]int
+		if anchorClf != nil {
+			anchorConf = make(map[string]map[string]int)
+			for _, q := range questions {
+				qvec := queryVecs[q.ID]
+				if qvec == nil {
+					continue
+				}
+				pred := string(anchorClf.Classify(qvec))
+				if anchorConf[pred] == nil {
+					anchorConf[pred] = make(map[string]int)
+				}
+				anchorConf[pred][q.Type]++
+			}
+		}
 		// For each predicted type bucket, the classifier picks bestWeightForType[pred].
 		// Then those queries get scored at that weight. Sum up total hits.
 		// Use per-(weight, actualType) hit fraction from sweep.
@@ -507,11 +550,37 @@ func main() {
 			}
 		}
 		if classifierTotal > 0 {
-			fmt.Printf("Estimated classifier-driven per-type R@5: %.1f%% (%d/%d)\n",
+			fmt.Printf("Heuristic classifier per-type R@5:       %.1f%% (%d/%d)\n",
 				float64(classifierHit)/float64(classifierTotal)*100,
 				classifierHit, classifierTotal)
-			fmt.Printf("(estimate uses per-(weight, actual-type) hit rate × predicted-type count)\n")
 		}
+		if anchorConf != nil {
+			anchorEstHit := 0
+			anchorEstTotal := 0
+			for pred, actuals := range anchorConf {
+				w := bestWeightForType[pred]
+				if _, ok := sweepByWeight[w]; !ok {
+					w = bestWeightForType["single-session-user"]
+				}
+				wr := sweepByWeight[w]
+				for actual, n := range actuals {
+					c := wr.typeHits[actual]
+					if c[1] == 0 {
+						continue
+					}
+					rate := float64(c[0]) / float64(c[1])
+					expected := int(rate*float64(n) + 0.5)
+					anchorEstHit += expected
+					anchorEstTotal += n
+				}
+			}
+			if anchorEstTotal > 0 {
+				fmt.Printf("Anchor classifier per-type R@5:          %.1f%% (%d/%d)\n",
+					float64(anchorEstHit)/float64(anchorEstTotal)*100,
+					anchorEstHit, anchorEstTotal)
+			}
+		}
+		fmt.Printf("(estimates use per-(weight, actual-type) hit rate × predicted-type count)\n")
 		fmt.Printf("\nReporting best weight (%.2f) below.\n", best.weight)
 	}
 
