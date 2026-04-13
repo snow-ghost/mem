@@ -11,6 +11,7 @@ import (
 	"github.com/snow-ghost/mem/internal/config"
 	"github.com/snow-ghost/mem/internal/embeddings"
 	"github.com/snow-ghost/mem/internal/palace"
+	"github.com/snow-ghost/mem/internal/rerank"
 	"github.com/snow-ghost/mem/internal/search"
 )
 
@@ -189,6 +190,19 @@ func runBenchmark(args []string) int {
 	}
 	_ = hnswCutoff // kept as a flag for users tuning their own thresholds
 
+	// Phase 4b: hybrid (BM25 + vector via RRF) using synthetic vectors.
+	// We approximate the query side by reusing one of the corpus vectors
+	// as the "query vector" — the magnitude of the speed measurement is
+	// what matters here, not the relevance score.
+	hybridStart := time.Now()
+	for i, q := range queries {
+		_, _ = search.SearchHybridWeighted(d, q, qvecs[i], 0, 0, 10, 0.7)
+	}
+	hybridDur := time.Since(hybridStart)
+	fmt.Printf("Hybrid (BM25+vec, RRF 0.7): %s avg/query (%s for %d queries)\n",
+		(hybridDur / time.Duration(nQueries)).Round(time.Microsecond),
+		hybridDur.Round(time.Millisecond), nQueries)
+
 	// Phase 5: real embeddings round-trip (if configured)
 	if cfg.EmbeddingsEnabled() && !skipBuild {
 		fmt.Printf("\n--- embeddings provider (%s) ---\n", cfg.EmbeddingsModel)
@@ -216,6 +230,34 @@ func runBenchmark(args []string) int {
 		}
 	} else if !cfg.EmbeddingsEnabled() {
 		fmt.Printf("\n(MEM_EMBEDDINGS_URL not set — skipping real-embeddings probe)\n")
+	}
+
+	// Phase 6: reranker probe (if configured)
+	if cfg.RerankEnabled() && !skipBuild {
+		fmt.Printf("\n--- reranker provider (%s) ---\n", cfg.RerankModel)
+		rclient := rerank.NewClient(cfg)
+		// Single rerank with 10 docs
+		docs := make([]string, 10)
+		for i := range docs {
+			docs[i] = contents[rng.Intn(len(contents))]
+		}
+		probe := time.Now()
+		if _, err := rclient.Score("benchmark probe query", docs); err != nil {
+			fmt.Fprintf(os.Stderr, "rerank probe: %v\n", err)
+		} else {
+			fmt.Printf("Rerank-10-docs latency:     %s\n", time.Since(probe).Round(time.Millisecond))
+		}
+		// 20-doc batch
+		docs20 := make([]string, 20)
+		for i := range docs20 {
+			docs20[i] = contents[rng.Intn(len(contents))]
+		}
+		probe20 := time.Now()
+		if _, err := rclient.Score("benchmark probe query", docs20); err != nil {
+			fmt.Fprintf(os.Stderr, "rerank probe 20: %v\n", err)
+		} else {
+			fmt.Printf("Rerank-20-docs latency:     %s\n", time.Since(probe20).Round(time.Millisecond))
+		}
 	}
 
 	fmt.Printf("\nPalace artefact: %s (will be removed)\n", filepath.Join(tmpDir, "bench.db"))
