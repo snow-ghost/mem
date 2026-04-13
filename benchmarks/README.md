@@ -276,8 +276,16 @@ rare-term-heavy, but the aggregate is flat.
 | L# Cache max-merge | 54.2% | 77.2% | 81.8% |
 | L# Cache max + BM25 blend 0.3 | 54.6% | 77.0% | 81.8% |
 | L# Cache max + oracle-gated rerank | 55.0% | 77.4% | 82.0% |
-| **L# Cache max + Query2Doc** | **55.4%** | **77.8%** | **82.6%** |
+| **L# Cache max + Query2Doc** | 55.4% | **77.8%** | **82.6%** |
+| L# Cache max + Q2D + oracle-rerank | **56.4%** | 76.8% | 81.8% |
 | _MemPalace (ChromaDB + MiniLM)_ | _?_ | _96.6%_ | _?_ |
+
+Note: stacking rerank on top of Query2Doc slightly regresses R@5
+(-1.0 pp) because both techniques target first-stage ranking. Once
+Q2D has strengthened the first stage (e.g., knowledge-update from
+92.3 → 94.9 R@5), the cross-encoder disagrees with it and pushes some
+correct sessions back out of top-5. Rerank still adds R@1 (+1.0),
+useful when top-1 is the headline metric.
 
 Gap to MemPalace shrank from 27.2 pp (starting BM25) to **18.8 pp**
 via technique work alone, on the same BAAI/bge-m3 embedding model.
