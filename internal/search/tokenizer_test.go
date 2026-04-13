@@ -2,9 +2,10 @@ package search
 
 import "testing"
 
-func TestTokenize_GivenSentence_WhenTokenized_ThenStopwordsRemoved(t *testing.T) {
+func TestTokenize_GivenSentence_WhenTokenized_ThenStopwordsRemovedAndStemmed(t *testing.T) {
 	tokens := Tokenize("The quick brown fox jumps over the lazy dog")
-	want := []string{"quick", "brown", "fox", "jumps", "lazy", "dog"}
+	// "jumps" → "jump" via Porter step 1a; "lazy" stays (step 1c not implemented)
+	want := []string{"quick", "brown", "fox", "jump", "lazy", "dog"}
 	if len(tokens) != len(want) {
 		t.Fatalf("got %d tokens %v, want %d %v", len(tokens), tokens, len(want), want)
 	}

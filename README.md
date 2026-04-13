@@ -168,18 +168,17 @@ for reproduction steps.
 
 ### LongMemEval (ICLR 2025) — 500 questions, 6 question types
 
-| Metric | BM25 (offline) | Hybrid (BM25 + bge-m3, weighted RRF 0.60) |
+| Metric | BM25 + stemming (offline) | Hybrid (BM25 + bge-m3, weighted RRF 0.70) |
 |---|---:|---:|
-| **Recall@5** | **69.4%** | **74.8%** |
-| Recall@1 | 45.6% | 50.4% |
-| Recall@10 | 78.4% | 78.6% |
-| Avg query latency | 7.1 ms | 67 ms |
+| **Recall@5** | **71.0%** | **74.6%** |
+| Recall@1 | 44.4% | 48.0% |
+| Recall@10 | 77.2% | 79.2% |
+| Avg query latency | 8.6 ms | 67 ms |
 
-Pure BM25 matches the published BM25 baseline (~70%), confirming the
-implementation is correct. Hybrid mode (BM25 + cosine fused via weighted
-Reciprocal Rank Fusion, 0.6 BM25 / 0.4 vector) adds **+5.4 R@5** with
-`BAAI/bge-m3` — biggest wins on preference (+13.3), temporal-reasoning
-(+9.0), knowledge-update (+9.0).
+Tokenizer applies Porter step 1a/1b stemming — `+1.6 R@5` on BM25 alone
+without any external dependency. Hybrid mode adds another `+3.6 R@5` on top
+via weighted Reciprocal Rank Fusion (0.7 BM25 / 0.3 vector). Best wins on
+preference (+6.7), temporal-reasoning (+4.5), knowledge-update (+5.1).
 
 ### LoCoMo (Snap Research) — 10 long-form conversations, 1986 QAs
 

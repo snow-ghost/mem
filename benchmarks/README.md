@@ -55,51 +55,55 @@ LocalAI, llama.cpp server, cloud.ru foundation-models, etc.).
 ### Current results
 
 Two modes measured: pure BM25 (default, offline) and hybrid BM25 + bge-m3 via
-weighted Reciprocal Rank Fusion (k=60, BM25 weight 0.60 by default).
+weighted Reciprocal Rank Fusion (k=60). Tokenizer applies Porter step 1a/1b
+stemming (e.g., `running` → `run`, `ponies` → `poni`).
 
-| Metric | BM25 | Hybrid 0.5/0.5 | Hybrid 0.6/0.4 |
+| Metric | BM25 | Hybrid 0.5/0.5 | Hybrid 0.7/0.3 |
 |---|---:|---:|---:|
-| Recall@1 | 45.6% | 51.2% | 50.4% |
-| **Recall@5** | 69.4% | 74.2% | **74.8%** |
-| Recall@10 | 78.4% | 79.4% | 78.6% |
-| BM25 index build | 27.4s | 27.5s | 27.5s |
+| Recall@1 | 44.4% | 48.8% | 48.0% |
+| **Recall@5** | **71.0%** | 73.4% | **74.6%** |
+| Recall@10 | 77.2% | 79.2% | 79.2% |
+| BM25 index build | 26s | 26s | 26s |
 | Embedding index build | — | ~5 min | ~5 min |
-| Avg query latency | 7.1ms | 377ms | 67ms |
+| Avg query latency | 8.6ms | 67ms | 67ms |
+
+Stemming alone gives BM25 **+1.6 R@5** (69.4 → 71.0) without any model
+dependency. Hybrid mode adds another **+3.6 R@5** on top. Best RRF weight
+shifts from 0.60 (no stemming) to 0.70 (with stemming) — stronger BM25
+deserves a bit more weight in the fusion.
 
 The hybrid run used `BAAI/bge-m3` (1024-dim) via the cloud.ru
 foundation-models API. Drawer text was truncated to 1500 chars before
 embedding to avoid hitting server-side input-length issues.
 
-#### Per-type Recall@5: BM25 vs hybrid (weight 0.60)
+#### Per-type Recall@5: BM25 vs hybrid (with stemming)
 
-| Type | BM25 | Hybrid 0.6 | Δ |
+| Type | BM25 | Hybrid 0.7 | Δ |
 |---|---:|---:|---:|
-| single-session-preference | 56.7% | **70.0%** | **+13.3** |
-| temporal-reasoning | 53.4% | **62.4%** | **+9.0** |
-| knowledge-update | 78.2% | **87.2%** | **+9.0** |
-| multi-session | 64.7% | **69.2%** | **+4.5** |
+| knowledge-update | 82.1% | **87.2%** | **+5.1** |
+| single-session-preference | 60.0% | **66.7%** | **+6.7** |
+| multi-session | 66.2% | **69.9%** | **+3.7** |
+| single-session-user | 81.4% | **84.3%** | **+2.9** |
+| temporal-reasoning | **54.9%** | 59.4% | +4.5 |
 | single-session-assistant | **98.2%** | 96.4% | -1.8 |
-| single-session-user | **81.4%** | 80.0% | -1.4 |
 
-The big wins are in categories where lexical overlap is weak — exactly where
-semantic embeddings should help. The strong-BM25 categories
-(single-session-assistant, single-session-user) regress slightly even with
-the weighted RRF, suggesting per-type weight tuning could help further.
+Stemming with hybrid: most categories improve, only single-session-assistant
+regresses slightly (the same ~2pp gap as without stemming).
 
-#### RRF weight sweep (BM25 weight)
+#### RRF weight sweep with stemming
 
 | Weight | R@1 | R@5 | R@10 |
 |---:|---:|---:|---:|
-| 0.30 | 50.6% | 73.4% | **80.0%** |
-| 0.50 | **51.2%** | 74.2% | 79.4% |
-| **0.60** | 50.4% | **74.8%** | 78.6% |
-| 0.70 | 49.2% | 74.2% | 78.4% |
-| 0.85 | 49.6% | 73.0% | 79.2% |
+| 0.40 | 49.0% | 73.2% | **79.8%** |
+| 0.50 | **48.8%** | 73.4% | 79.2% |
+| 0.60 | 48.6% | 73.6% | 79.0% |
+| **0.70** | 48.0% | **74.6%** | 79.2% |
 
-Sweet spot is **0.60** — slightly more weight on BM25 than vector. Set
-`LME_RRF_WEIGHTS=0.3,0.5,0.6,0.7,0.85` to reproduce the sweep in one
-embedding pass (the retrieval loop reruns per weight against the same
-already-embedded palace, ~5s per weight).
+Best weight shifts from 0.60 (no stemming) to 0.70 (with stemming) — the
+stronger BM25 signal earns more trust in the fusion. Set
+`LME_RRF_WEIGHTS=0.4,0.5,0.6,0.7` to reproduce the sweep in one embedding
+pass (retrieval loop reruns per weight against the same already-embedded
+palace, ~5s per weight).
 
 #### Comparison with other memory systems
 

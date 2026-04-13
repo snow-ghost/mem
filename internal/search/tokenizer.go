@@ -35,7 +35,7 @@ func Tokenize(text string) []string {
 		if len(w) < 2 || stopwords[w] {
 			continue
 		}
-		tokens = append(tokens, w)
+		tokens = append(tokens, porterStem(w))
 	}
 	return tokens
 }
