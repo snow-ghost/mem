@@ -78,6 +78,12 @@ func main() {
 		}
 	}
 	lcacheMerge := os.Getenv("LME_LCACHE_MERGE") // "" (default weighted sum), "max"
+	// LME_QUERY2DOC_MODEL + LME_QUERY2DOC_URL enable Query2Doc / HyDE-style
+	// query expansion: LLM generates a plausible pseudo-answer sentence,
+	// which is embedded and averaged with the original query embedding.
+	q2dModel := os.Getenv("LME_QUERY2DOC_MODEL")
+	q2dURL := os.Getenv("LME_QUERY2DOC_URL")
+	useQuery2Doc := q2dModel != "" && q2dURL != ""
 	// LME_LCACHE_BM25=<float> adds a BM25 session-score contribution to
 	// the L# Cache ranking. The BM25 half runs over the same 3 variants
 	// per session (L0/L1/L2 drawers) and takes the max rank per session.
@@ -104,6 +110,9 @@ func main() {
 		}
 		fmt.Printf("L# Cache: enabled (L0=full, L1=user, L2=first3user, weights %.2f/%.2f/%.2f, merge=%s)\n",
 			lcacheW0, lcacheW1, lcacheW2, merge)
+	}
+	if useQuery2Doc {
+		fmt.Printf("Query2Doc: enabled (model=%s)\n", q2dModel)
 	}
 	fmt.Println()
 
@@ -260,6 +269,72 @@ func main() {
 		}
 		fmt.Printf("Query embedding done in %s (stored %d, failed %d, fallback to BM25)\n",
 			time.Since(qStart).Round(time.Millisecond), stored, qFailed)
+
+		// Query2Doc pass: for each query, get a pseudo-doc from the LLM,
+		// embed it, then average with the original query vector.
+		if useQuery2Doc {
+			fmt.Printf("Query2Doc: generating %d pseudo-docs (8 workers)...\n", len(questions))
+			q2dStart := time.Now()
+			chat := embeddings.NewChatClient(q2dURL, q2dModel, envCfg.EmbeddingsAPIKey)
+			pseudos := make([]string, len(questions))
+			var wg sync.WaitGroup
+			jobs := make(chan int)
+			var doneMu sync.Mutex
+			done := 0
+			for w := 0; w < 8; w++ {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					for i := range jobs {
+						prompt := "Write one short plausible answer sentence to help retrieve the relevant passage. Question: " + questions[i].Question
+						if out, err := chat.Complete(prompt, 80); err == nil {
+							pseudos[i] = strings.TrimSpace(out)
+						}
+						doneMu.Lock()
+						done++
+						if done%50 == 0 {
+							fmt.Printf("  %d/%d pseudo-docs...\n", done, len(questions))
+						}
+						doneMu.Unlock()
+					}
+				}()
+			}
+			for i := range questions {
+				jobs <- i
+			}
+			close(jobs)
+			wg.Wait()
+
+			// Embed pseudo-docs in batch
+			nonEmpty := 0
+			pseudoTexts := make([]string, 0, len(pseudos))
+			pseudoIdx := make([]int, 0, len(pseudos))
+			for i, p := range pseudos {
+				if p != "" {
+					pseudoTexts = append(pseudoTexts, p)
+					pseudoIdx = append(pseudoIdx, i)
+					nonEmpty++
+				}
+			}
+			if nonEmpty > 0 {
+				pseudoVecs, _, err := embedClient.EmbedAll(pseudoTexts, 4, 8, nil)
+				if err == nil {
+					// Average with original query vector
+					for k, idx := range pseudoIdx {
+						if pseudoVecs[k] == nil {
+							continue
+						}
+						orig, ok := queryVecs[questions[idx].ID]
+						if !ok {
+							continue
+						}
+						queryVecs[questions[idx].ID] = embeddings.MeanVecs(orig, pseudoVecs[k])
+					}
+				}
+			}
+			fmt.Printf("Query2Doc done in %s (non-empty: %d/%d)\n",
+				time.Since(q2dStart).Round(time.Millisecond), nonEmpty, len(questions))
+		}
 	}
 
 	// In hybrid mode, optionally sweep RRF weights (LME_RRF_WEIGHTS=0.3,0.5,0.7).

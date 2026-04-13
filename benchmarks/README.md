@@ -202,6 +202,25 @@ is the largest single-knob improvement after recency on ConvoMem.
 Override weights via `LME_LCACHE_WEIGHTS="0.5,0.3,0.2"`, switch to
 max-merge via `LME_LCACHE_MERGE=max`.
 
+##### Query2Doc / HyDE-style query expansion
+
+For each query, ask an LLM (Qwen3-Next-80B via cloud.ru chat completions)
+to write one plausible answer sentence, embed it, then average with the
+original query vector. Tiny stage in the overall pipeline — adds ~3 min
+of LLM calls to a 15 min embedding run:
+
+| Config | R@1 | R@5 | R@10 |
+|---|---:|---:|---:|
+| L# Cache max-merge | 54.2% | 77.2% | 81.8% |
+| **L# max + Query2Doc** | **55.4%** | **77.8%** | **82.6%** |
+
+Biggest per-type gain: **single-session-preference 63.3 → 70.0** (+6.7),
+**knowledge-update 92.3 → 94.9** (+2.6). The LLM gives the retriever
+a concrete-sounding answer hypothesis that lexically matches the
+correct session better than an abstract question form.
+
+Enable with `LME_QUERY2DOC_URL` + `LME_QUERY2DOC_MODEL`.
+
 ##### Embedding model A/B: bge-m3 vs Qwen3-Embedding-0.6B (both 1024-dim)
 
 Same L# Cache max-merge pipeline, just swap `MEM_EMBEDDINGS_MODEL`:
@@ -256,10 +275,11 @@ rare-term-heavy, but the aggregate is flat.
 | L# Cache weighted-sum | 53.0% | 74.4% | **82.4%** |
 | L# Cache max-merge | 54.2% | 77.2% | 81.8% |
 | L# Cache max + BM25 blend 0.3 | 54.6% | 77.0% | 81.8% |
-| **L# Cache max + oracle-gated rerank** | **55.0%** | **77.4%** | 82.0% |
+| L# Cache max + oracle-gated rerank | 55.0% | 77.4% | 82.0% |
+| **L# Cache max + Query2Doc** | **55.4%** | **77.8%** | **82.6%** |
 | _MemPalace (ChromaDB + MiniLM)_ | _?_ | _96.6%_ | _?_ |
 
-Gap to MemPalace shrank from 27.2 pp (starting BM25) to **19.2 pp**
+Gap to MemPalace shrank from 27.2 pp (starting BM25) to **18.8 pp**
 via technique work alone, on the same BAAI/bge-m3 embedding model.
 Closing the rest would need either the actual ChromaDB reference
 model (all-MiniLM-L6-v2 via llama.cpp locally) or an alternative
