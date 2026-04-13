@@ -95,6 +95,9 @@ export MEM_RERANK_MODEL=BAAI/bge-reranker-v2-m3
 
 # Start MCP server (for Claude Code integration)
 mem mcp
+
+# Benchmark your config (BM25 / vector full-scan / HNSW / API latency)
+mem benchmark --drawers 5000 --queries 200
 ```
 
 ## How it works

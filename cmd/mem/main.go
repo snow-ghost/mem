@@ -45,6 +45,8 @@ func main() {
 		os.Exit(runMCP(os.Args[2:]))
 	case "reindex":
 		os.Exit(runReindex(os.Args[2:]))
+	case "benchmark":
+		os.Exit(runBenchmark(os.Args[2:]))
 	default:
 		fmt.Fprintf(os.Stderr, "mem: unknown command %q\n", os.Args[1])
 		usage()
@@ -63,6 +65,7 @@ Commands:
   wake-up      Load compact context for AI session
   kg           Knowledge graph operations
   reindex      Compute embeddings for all drawers (requires MEM_EMBEDDINGS_*)
+  benchmark    Time BM25/vector/hybrid/HNSW on synthetic data
   mcp          Start MCP server`)
 }
 
