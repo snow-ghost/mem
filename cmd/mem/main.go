@@ -114,10 +114,55 @@ func runStatus(args []string) int {
 	}
 
 	fmt.Printf("Palace: %s\n", s.PalacePath)
-	fmt.Printf("  Wings:   %d\n", s.Wings)
-	fmt.Printf("  Rooms:   %d\n", s.Rooms)
-	fmt.Printf("  Drawers: %d\n", s.Drawers)
+	if s.DbSizeBytes > 0 {
+		fmt.Printf("  DB size:   %s\n", humanBytes(s.DbSizeBytes))
+	}
+	fmt.Printf("  Wings:     %d\n", s.Wings)
+	fmt.Printf("  Rooms:     %d\n", s.Rooms)
+	fmt.Printf("  Drawers:   %d", s.Drawers)
+	if s.Drawers > 0 {
+		pct := float64(s.DrawersEmbedded) / float64(s.Drawers) * 100
+		fmt.Printf(" (%d embedded, %.0f%%)", s.DrawersEmbedded, pct)
+	}
+	fmt.Println()
+	if s.Triples > 0 {
+		fmt.Printf("  KG triples: %d\n", s.Triples)
+	}
+
+	if len(s.WingBreakdown) > 0 {
+		fmt.Println()
+		fmt.Println("Wings:")
+		for _, w := range s.WingBreakdown {
+			suffix := ""
+			if w.Drawers > 0 && w.DrawersEmbedded > 0 {
+				suffix = fmt.Sprintf(" (%d embedded)", w.DrawersEmbedded)
+			}
+			fmt.Printf("  %-30s %-12s %d drawers%s\n", w.Name, w.Type, w.Drawers, suffix)
+		}
+	}
+
+	if len(s.HNSWCaches) > 0 {
+		fmt.Println()
+		fmt.Println("HNSW caches:")
+		for _, h := range s.HNSWCaches {
+			fmt.Printf("  %-20s drawers=%d  dim=%d  blob=%s  updated=%s\n",
+				h.Name, h.DrawerCount, h.Dim, humanBytes(h.BlobBytes), h.UpdatedAt)
+		}
+	}
 	return 0
+}
+
+func humanBytes(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	div, exp := int64(unit), 0
+	for n2 := n / unit; n2 >= unit; n2 /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", float64(n)/float64(div), "KMGTPE"[exp])
 }
 
 func runMine(args []string) int {

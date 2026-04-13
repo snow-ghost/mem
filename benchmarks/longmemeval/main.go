@@ -56,6 +56,11 @@ func main() {
 	}
 
 	fmt.Println("=== LongMemEval Benchmark for mem ===")
+	recencyWeight := 0.0
+	if v := os.Getenv("LME_RECENCY"); v != "" {
+		fmt.Sscanf(v, "%f", &recencyWeight)
+	}
+
 	fmt.Printf("Dataset: %s\n", dataFile)
 	fmt.Printf("Mode: %s\n", mode)
 	if useEmbeddings {
@@ -63,6 +68,9 @@ func main() {
 	}
 	if useRerank {
 		fmt.Printf("Reranker: %s (LME_RERANK=1)\n", envCfg.RerankModel)
+	}
+	if recencyWeight > 0 {
+		fmt.Printf("Recency boost: %.2f (LME_RECENCY)\n", recencyWeight)
 	}
 	fmt.Println()
 
@@ -309,6 +317,9 @@ func main() {
 				results, _ = search.SearchHybridWeighted(d, q.Question, qvec, 0, 0, candidateLimit, w)
 			default:
 				results, _ = search.Search(d, q.Question, 0, 0, candidateLimit)
+			}
+			if recencyWeight > 0 {
+				results = search.ApplyRecencyBoost(results, recencyWeight)
 			}
 			perQResults[i] = results
 		}
