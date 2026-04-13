@@ -124,11 +124,44 @@ the top-10 by reranker score.
 | Stage | R@1 | R@5 | R@10 |
 |---|---:|---:|---:|
 | Hybrid 0.7 (no rerank) | 48.0% | 74.6% | 79.2% |
-| Hybrid 0.7 + rerank | **52.6%** | 74.6% | **80.8%** |
+| Hybrid 0.7 + rerank (all) | **52.6%** | 74.6% | 80.8% |
+| Hybrid 0.7 + rerank (classifier-gated) | 48.4% | 75.2% | **81.6%** |
+| Hybrid 0.7 + rerank (oracle-gated) | 50.0% | **76.4%** | 81.2% |
 
-Reranker buys you **+4.6 R@1** and **+1.6 R@10** but doesn't move R@5.
-Useful when downstream consumers care most about the top-1 answer
-(LLMs answering with retrieval, single-best-snippet UIs).
+Rerank-everything buys **+4.6 R@1** but doesn't move R@5 — the reranker
+disagrees with first-stage ordering on the strong-BM25 categories
+(single-session-{user,assistant} regress -5.7 / -1.8). Per-category
+gating fixes that.
+
+#### Per-category rerank gating
+
+`LME_RERANK_GATE=oracle|classifier` only invokes the reranker when the
+question type is in `{temporal-reasoning, knowledge-update}` — the two
+categories where rerank consistently helped in earlier sweeps.
+
+- **oracle gate** (uses ground-truth `q.Type`): R@5 **76.4%** (+1.8 vs
+  no-rerank), R@10 81.2%. This is the upper bound — preserves the +3.8
+  wins on K-U and temporal while restoring 98.2% / 84.3% on
+  single-session-{assistant,user}.
+- **classifier gate** (heuristic via `search.ClassifyQuestion`): R@5
+  **75.2%** (+0.6). Captures ~33% of the oracle win.
+
+The heuristic classifier hits 53% type accuracy and 73% gate-decision
+accuracy. Per-type breakdown:
+
+| Actual type | Classifier acc |
+|---|---:|
+| single-session-assistant | 96.4% |
+| single-session-user | 81.4% |
+| temporal-reasoning | 78.2% |
+| multi-session | 32.3% |
+| single-session-preference | 30.0% |
+| **knowledge-update** | **0.0%** |
+
+knowledge-update is fundamentally indistinguishable from single-session-
+user from the question text alone (e.g., "What was my personal best 5K
+time?" looks identical to a single-session question). A real production
+classifier would need either training data or a small LLM call.
 
 #### Comparison with other memory systems
 

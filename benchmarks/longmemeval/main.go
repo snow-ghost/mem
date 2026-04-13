@@ -244,6 +244,27 @@ func main() {
 	if v := os.Getenv("LME_RERANK_WORKERS"); v != "" {
 		fmt.Sscanf(v, "%d", &rerankWorkers)
 	}
+	// Rerank gating: when LME_RERANK_GATE=oracle (or "classifier") only
+	// apply the reranker for question types where it helped (knowledge-update,
+	// temporal-reasoning per our prior sweep). Other types skip rerank.
+	rerankGate := os.Getenv("LME_RERANK_GATE")
+	gateAllowed := map[string]bool{
+		"temporal-reasoning": true,
+		"knowledge-update":   true,
+	}
+
+	// Track classifier accuracy on the way through (separate pass below)
+	classifierHits := 0
+	for _, q := range questions {
+		if string(search.ClassifyQuestion(q.Question)) == q.Type {
+			classifierHits++
+		}
+	}
+	if mode == "hybrid" && len(questions) > 0 {
+		fmt.Printf("Heuristic classifier accuracy: %.1f%% (%d/%d)\n",
+			float64(classifierHits)/float64(len(questions))*100,
+			classifierHits, len(questions))
+	}
 
 	runSweepWeight := func(w float64) weightResult {
 		wr := weightResult{weight: w, typeHits: make(map[string][2]int)}
@@ -267,10 +288,12 @@ func main() {
 
 		// Stage 2: cross-encoder re-rank in parallel. Each query is one
 		// HTTP call with `rerankPool` documents. Failed reranks fall back
-		// to first-stage ranking (no-op).
+		// to first-stage ranking (no-op). Per-type gating skips rerank
+		// for question types where it consistently hurts.
 		if useRerank {
 			var wg sync.WaitGroup
 			jobs := make(chan int)
+			gated := 0
 			for w := 0; w < rerankWorkers; w++ {
 				wg.Add(1)
 				go func() {
@@ -298,11 +321,27 @@ func main() {
 					}
 				}()
 			}
-			for i := range questions {
+			for i, q := range questions {
+				switch rerankGate {
+				case "oracle":
+					if !gateAllowed[q.Type] {
+						gated++
+						continue
+					}
+				case "classifier":
+					if !gateAllowed[string(search.ClassifyQuestion(q.Question))] {
+						gated++
+						continue
+					}
+				}
 				jobs <- i
 			}
 			close(jobs)
 			wg.Wait()
+			if rerankGate != "" && w == weights[0] {
+				fmt.Printf("Rerank gating (%s): %d/%d queries skipped rerank\n",
+					rerankGate, gated, len(questions))
+			}
 		}
 
 		// Tally hits
