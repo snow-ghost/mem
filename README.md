@@ -93,6 +93,9 @@ mem search "auth decision" --mode hybrid       # BM25 + cosine via RRF
 export MEM_RERANK_URL=https://your-endpoint/v1/rerank
 export MEM_RERANK_MODEL=BAAI/bge-reranker-v2-m3
 
+# Recency boost — favour newer drawers (great for changing facts)
+mem search "current geo-targeting setting" --recency 0.5
+
 # Start MCP server (for Claude Code integration)
 mem mcp
 

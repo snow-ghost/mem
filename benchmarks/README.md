@@ -419,18 +419,31 @@ Results on BM25 only:
 | 4 | 100% | 21.9% | 100% | 100% | 187 |
 | **Total** | **100%** | **26.1%** | **99.6%** | **99.6%** | **1290** |
 
-This is the real hard mode: BM25 retrieves every version into top-5 but
-picks the *latest* version at #1 only 26% of the time. The metric
-exactly captures what's challenging about changing facts. To reach R@1
-parity with R@5 here you'd need temporal-aware ranking — currently out
-of scope for `mem`.
+BM25 alone retrieves every version into top-5 but picks the *latest*
+version at #1 only 26% of the time — exactly the gap that motivates
+**temporal-aware ranking**.
 
-A downstream LLM with a 5-doc context window would still see the latest
-evidence (R@5 99.6%) and could answer correctly with a "use latest"
-prompt — so the practical impact for RAG flows is muted.
+#### Adding `search.ApplyRecencyBoost` (CONVOMEM_RECENCY=0.5)
+
+The boost adds `recencyWeight × (drawer.id − minID) / (maxID − minID)`
+to each result's score, then re-sorts. Higher drawer IDs (= more
+recently inserted) get a larger bonus. Re-running with `recencyWeight=0.5`:
+
+| Context size | Strict R@1 (no boost) | **Strict R@1 (recency 0.5)** | Δ |
+|---:|---:|---:|---:|
+| 2 | 24.8% | **99.5%** | +74.7 |
+| 3 | 31.4% | **99.7%** | +68.3 |
+| 4 | 21.9% | **100.0%** | +78.1 |
+| **Total** | **26.1%** | **99.6%** | **+73.5** |
+
+R@5 / R@10 unchanged (already 99.6%) — the boost just reorders inside
+the already-correct top-5 so the newest evidence wins #1. This is the
+single biggest improvement in the bench suite. Available as
+`search.ApplyRecencyBoost(results, weight)` for any caller; works on
+output of `Search`, `SearchVector`, `SearchHybrid*`.
 
 ## Future benchmarks
 
 - [ ] **ConvoMem at scale (50–300 convs)** — requires large batch downloads
-- [ ] **Temporal-aware ranking** — actually solve the changing_evidence R@1 gap
 - [ ] **MemoryBench** (Supermemory) — unified runner for cross-provider comparison
+- [ ] **LongMemEval with recency boost** — does it help temporal-reasoning?

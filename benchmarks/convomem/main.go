@@ -51,8 +51,17 @@ func main() {
 		dataDir = os.Args[1]
 	}
 
+	recencyWeight := 0.0
+	if v := os.Getenv("CONVOMEM_RECENCY"); v != "" {
+		fmt.Sscanf(v, "%f", &recencyWeight)
+	}
+
 	fmt.Println("=== ConvoMem Benchmark for mem ===")
-	fmt.Printf("Dataset dir: %s\n\n", dataDir)
+	fmt.Printf("Dataset dir: %s\n", dataDir)
+	if recencyWeight != 0 {
+		fmt.Printf("Recency boost: %.2f (CONVOMEM_RECENCY)\n", recencyWeight)
+	}
+	fmt.Println()
 
 	entries, err := os.ReadDir(dataDir)
 	if err != nil {
@@ -162,6 +171,9 @@ func main() {
 			for _, ev := range tc.EvidenceItems {
 				m.total++
 				results, _ := search.Search(d, ev.Question, 0, 0, 10)
+				if recencyWeight != 0 {
+					results = search.ApplyRecencyBoost(results, recencyWeight)
+				}
 
 				lenientHit := -1
 				strictHit := -1

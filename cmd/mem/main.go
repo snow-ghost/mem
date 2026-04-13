@@ -265,6 +265,7 @@ func runSearch(args []string) int {
 	var wingFlag, roomFlag, modeFlag string
 	var limitFlag int
 	var hnswFlag, perTypeFlag bool
+	var recencyFlag float64
 	fs := flag.NewFlagSet("search", flag.ContinueOnError)
 	fs.StringVar(&wingFlag, "wing", "", "filter by wing")
 	fs.StringVar(&roomFlag, "room", "", "filter by room")
@@ -272,6 +273,7 @@ func runSearch(args []string) int {
 	fs.IntVar(&limitFlag, "limit", 5, "max results")
 	fs.BoolVar(&hnswFlag, "hnsw", false, "use HNSW index for vector search (faster on >5k drawers)")
 	fs.BoolVar(&perTypeFlag, "per-type", false, "in hybrid mode, classify the query and pick the per-type RRF weight")
+	fs.Float64Var(&recencyFlag, "recency", 0, "post-rank recency boost weight in [0..1] (favours newer drawers — useful for changing facts)")
 	var palaceFlag string
 	fs.StringVar(&palaceFlag, "palace", "", "override palace path")
 	fs.Parse(args)
@@ -351,6 +353,10 @@ func runSearch(args []string) int {
 			fmt.Fprintf(os.Stderr, "mem: search: %v\n", err)
 			return 1
 		}
+	}
+
+	if recencyFlag > 0 {
+		results = search.ApplyRecencyBoost(results, recencyFlag)
 	}
 
 	if len(results) == 0 {

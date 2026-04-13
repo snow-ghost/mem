@@ -101,6 +101,45 @@ func TestHybridSearch_GivenBM25AndVector_WhenFused_ThenRRFCombines(t *testing.T)
 	}
 }
 
+func TestApplyRecencyBoost_GivenTiedScores_WhenBoosted_ThenNewerWins(t *testing.T) {
+	in := []SearchResult{
+		{DrawerID: 100, Score: 1.0},
+		{DrawerID: 200, Score: 1.0},
+		{DrawerID: 50, Score: 1.0},
+	}
+	out := ApplyRecencyBoost(in, 0.5)
+	// All scores tied → boost orders by DrawerID descending.
+	if out[0].DrawerID != 200 {
+		t.Errorf("top should be newest (200), got %d", out[0].DrawerID)
+	}
+	if out[2].DrawerID != 50 {
+		t.Errorf("bottom should be oldest (50), got %d", out[2].DrawerID)
+	}
+}
+
+func TestApplyRecencyBoost_GivenStrongScoreGap_WhenBoosted_ThenStrongScoreStillWins(t *testing.T) {
+	in := []SearchResult{
+		{DrawerID: 100, Score: 0.10},
+		{DrawerID: 200, Score: 0.50},
+	}
+	out := ApplyRecencyBoost(in, 0.1)
+	// Strong score (0.50) + 0 bonus > weak score (0.10) + 0.1 bonus
+	if out[0].DrawerID != 200 {
+		t.Errorf("top should still be 200 (strong score), got %d", out[0].DrawerID)
+	}
+}
+
+func TestApplyRecencyBoost_GivenZeroWeight_WhenCalled_ThenNoOp(t *testing.T) {
+	in := []SearchResult{
+		{DrawerID: 100, Score: 1.0},
+		{DrawerID: 200, Score: 0.5},
+	}
+	out := ApplyRecencyBoost(in, 0)
+	if out[0].Score != 1.0 || out[1].Score != 0.5 {
+		t.Errorf("zero weight should not change scores, got %v", out)
+	}
+}
+
 func TestListDrawersWithoutEmbeddings_GivenMixed_WhenListed_ThenOnlyMissing(t *testing.T) {
 	d := openVecTestDB(t)
 	defer d.Close()

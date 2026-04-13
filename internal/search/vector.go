@@ -86,6 +86,42 @@ var DefaultPerTypeWeights = map[QuestionType]float64{
 	TypeSingleSessionAssistant:  0.90,
 }
 
+// ApplyRecencyBoost re-scores results in-place by adding a recency
+// bonus, then re-sorts. Larger drawer IDs are treated as newer
+// (matches insert order for SQLite AUTOINCREMENT). The bonus is
+//
+//	bonus(d) = recencyWeight * (drawer.ID - minID) / (maxID - minID)
+//
+// so the most recent drawer in the result set gets the full bonus and
+// the oldest gets none. Useful when the downstream metric prefers the
+// latest version of a fact (ConvoMem changing_evidence-style queries).
+func ApplyRecencyBoost(results []SearchResult, recencyWeight float64) []SearchResult {
+	if len(results) <= 1 || recencyWeight == 0 {
+		return results
+	}
+	var minID, maxID int64 = results[0].DrawerID, results[0].DrawerID
+	for _, r := range results {
+		if r.DrawerID < minID {
+			minID = r.DrawerID
+		}
+		if r.DrawerID > maxID {
+			maxID = r.DrawerID
+		}
+	}
+	span := float64(maxID - minID)
+	if span == 0 {
+		return results
+	}
+	for i := range results {
+		bonus := recencyWeight * float64(results[i].DrawerID-minID) / span
+		results[i].Score += bonus
+	}
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].Score > results[j].Score
+	})
+	return results
+}
+
 // SearchHybridAuto classifies the query, looks up the per-type BM25
 // weight (from DefaultPerTypeWeights or override), and runs weighted
 // RRF. Falls back to weight 0.7 if the predicted type isn't in the map.
