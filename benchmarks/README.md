@@ -157,6 +157,51 @@ stronger BM25 signal earns more trust in the fusion. Set
 pass (retrieval loop reruns per weight against the same already-embedded
 palace, ~5s per weight).
 
+#### L# Cache: multi-level per-session embedding (new best R@5)
+
+Inspired by [Schift's LongMemEval writeup](https://schift.io/blog/longmemeval-benchmark/).
+Instead of one embedding per session, store three variants:
+
+- **L0** = full session text (user + assistant turns)
+- **L1** = user turns only (strips assistant verbosity)
+- **L2** = first three user turns (zero-cost summary proxy)
+
+At retrieval, compute cosine between the query vector and each
+variant's vector, then either (a) weighted-sum them per session or
+(b) take the max. Session-level scores rank sessions for top-K.
+
+`LME_LCACHE=1` with BAAI/bge-m3:
+
+| Merge | R@1 | R@5 | R@10 | Notes |
+|---|---:|---:|---:|---|
+| weighted-sum 0.2/0.5/0.3 (Schift defaults) | 53.0% | 74.4% | **82.4%** | L1-heavy fusion |
+| **max** per session | **54.2%** | **77.2%** | 81.8% | new best R@5 |
+
+Max-merge wins because it avoids penalising sessions where the answer
+lives only in the assistant turn (e.g., "remind me what you said
+about X" — the user turn is the question, the answer is in L0).
+Weighted-sum's L1-heavy fusion tanks single-session-assistant to
+78.6% (-17.8 vs hybrid); max-merge keeps it at 92.9%.
+
+Per-type R@5 (max-merge vs hybrid 0.7):
+
+| Type | Hybrid | Max-merge | Δ |
+|---|---:|---:|---:|
+| single-session-user | 84.3% | **94.3%** | **+10.0** |
+| knowledge-update | 87.2% | **92.3%** | **+5.1** |
+| temporal-reasoning | 59.4% | **61.7%** | +2.3 |
+| multi-session | 69.9% | **71.4%** | +1.5 |
+| single-session-assistant | **96.4%** | 92.9% | -3.5 |
+| single-session-preference | 66.7% | 63.3% | -3.4 |
+
+Cost: 3× drawer embeddings (948 sessions → 2844 drawers), ~7 min
+with cloud.ru bge-m3 (~5 min with weighted-sum due to faster queries).
+The R@5 win (+2.4 pp over hybrid, +0.8 pp over oracle-gated rerank)
+is the largest single-knob improvement after recency on ConvoMem.
+
+Override weights via `LME_LCACHE_WEIGHTS="0.5,0.3,0.2"`, switch to
+max-merge via `LME_LCACHE_MERGE=max`.
+
 #### Cross-encoder reranking
 
 Set `MEM_RERANK_URL`, `MEM_RERANK_MODEL` (Cohere-compatible `/v1/rerank`,

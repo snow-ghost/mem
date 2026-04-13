@@ -12,6 +12,7 @@ import (
 	"sync"
 
 	"github.com/snow-ghost/mem/internal/config"
+	"github.com/snow-ghost/mem/internal/db"
 	"github.com/snow-ghost/mem/internal/embeddings"
 	"github.com/snow-ghost/mem/internal/palace"
 	"github.com/snow-ghost/mem/internal/rerank"
@@ -60,6 +61,23 @@ func main() {
 	if v := os.Getenv("LME_RECENCY"); v != "" {
 		fmt.Sscanf(v, "%f", &recencyWeight)
 	}
+	// LME_LCACHE=1 enables Schift-style per-session multi-level embedding:
+	// L0 = full session, L1 = user turns only, L2 = first 3 user turns.
+	// At retrieval, each session's score = w0*L0 + w1*L1 + w2*L2 on cosine
+	// to the query. Defaults match the Schift paper (L1-heavy), override
+	// with LME_LCACHE_WEIGHTS="w0,w1,w2". LME_LCACHE_MERGE=max switches
+	// from weighted sum to per-session max similarity across variants.
+	useLCache := os.Getenv("LME_LCACHE") == "1"
+	lcacheW0, lcacheW1, lcacheW2 := 0.2, 0.5, 0.3
+	if v := os.Getenv("LME_LCACHE_WEIGHTS"); v != "" {
+		parts := strings.Split(v, ",")
+		if len(parts) == 3 {
+			fmt.Sscanf(strings.TrimSpace(parts[0]), "%f", &lcacheW0)
+			fmt.Sscanf(strings.TrimSpace(parts[1]), "%f", &lcacheW1)
+			fmt.Sscanf(strings.TrimSpace(parts[2]), "%f", &lcacheW2)
+		}
+	}
+	lcacheMerge := os.Getenv("LME_LCACHE_MERGE") // "" (default weighted sum), "max"
 
 	fmt.Printf("Dataset: %s\n", dataFile)
 	fmt.Printf("Mode: %s\n", mode)
@@ -71,6 +89,14 @@ func main() {
 	}
 	if recencyWeight > 0 {
 		fmt.Printf("Recency boost: %.2f (LME_RECENCY)\n", recencyWeight)
+	}
+	if useLCache {
+		merge := "weighted-sum"
+		if lcacheMerge == "max" {
+			merge = "max"
+		}
+		fmt.Printf("L# Cache: enabled (L0=full, L1=user, L2=first3user, weights %.2f/%.2f/%.2f, merge=%s)\n",
+			lcacheW0, lcacheW1, lcacheW2, merge)
 	}
 	fmt.Println()
 
@@ -105,10 +131,35 @@ func main() {
 
 	var totalSessions, totalDrawers int
 	var batchItems []struct{ ID int64; Content string }
+	// For L# Cache: map session id → [L0 content, L1 content, L2 content]
+	lcacheSessions := make(map[string]*sessionVariants)
 
 	for _, q := range questions {
 		for _, session := range q.HaystackSessions {
 			totalSessions++
+			sessionID := fmt.Sprintf("session_%d", totalSessions)
+
+			if useLCache {
+				l0, l1, l2 := makeSessionVariants(session)
+				sv := &sessionVariants{sessionID: sessionID, l0: l0, l1: l1, l2: l2}
+				lcacheSessions[sessionID] = sv
+				for _, v := range []struct{ hall, content string }{
+					{"L0", l0}, {"L1", l1}, {"L2", l2},
+				} {
+					if len(v.content) < 5 {
+						continue
+					}
+					roomName := detectRoom(v.content)
+					room, _ := palace.CreateRoom(d, roomName, wing.ID)
+					drawer, _ := palace.AddDrawer(d, v.content, wing.ID, room.ID, v.hall, sessionID, "conversation")
+					if drawer != nil {
+						totalDrawers++
+						batchItems = append(batchItems, struct{ ID int64; Content string }{drawer.ID, v.content})
+					}
+				}
+				continue
+			}
+
 			// Chunk session into exchange pairs (user+assistant) for better BM25 granularity
 			chunks := chunkSession(session)
 			for _, chunk := range chunks {
@@ -117,7 +168,7 @@ func main() {
 				}
 				roomName := detectRoom(chunk)
 				room, _ := palace.CreateRoom(d, roomName, wing.ID)
-				drawer, _ := palace.AddDrawer(d, chunk, wing.ID, room.ID, "facts", fmt.Sprintf("session_%d", totalSessions), "conversation")
+				drawer, _ := palace.AddDrawer(d, chunk, wing.ID, room.ID, "facts", sessionID, "conversation")
 				if drawer != nil {
 					totalDrawers++
 					batchItems = append(batchItems, struct{ ID int64; Content string }{drawer.ID, chunk})
@@ -311,6 +362,9 @@ func main() {
 			var results []search.SearchResult
 			qvec := queryVecs[q.ID]
 			switch {
+			case useLCache && qvec != nil:
+				results = lcacheSearch(d, qvec, lcacheSessions, candidateLimit,
+					lcacheW0, lcacheW1, lcacheW2, lcacheMerge)
 			case mode == "vector" && qvec != nil:
 				results, _ = search.SearchVector(d, qvec, 0, 0, candidateLimit)
 			case mode == "hybrid" && qvec != nil:
@@ -647,6 +701,116 @@ func normalizeAnswer(answer any) string {
 	default:
 		return strings.ToLower(fmt.Sprintf("%v", answer))
 	}
+}
+
+// lcacheSearch implements Schift-style per-session weighted merge over
+// L0/L1/L2 embeddings. It loads every drawer's embedding blob + hall
+// + source_file (cached across queries via the sql driver's row buffer),
+// computes cosine to qvec, then groups by source_file (session id) and
+// returns one SearchResult per session with content = the session's L0
+// text (so the downstream containsAnswer check still operates on full
+// content). Score = 0.2*L0 + 0.5*L1 + 0.3*L2.
+//
+// lcacheSessionsByID lets us hand back the L0 content as the result's
+// Content — evidence matching stays on the complete session, not on
+// whichever variant "won" the cosine.
+func lcacheSearch(d *db.DB, qvec []float32, lcacheSessionsByID map[string]*sessionVariants,
+	limit int, wL0, wL1, wL2 float64, mergeMode string) []search.SearchResult {
+	rows, err := d.Query(`SELECT source_file, hall, embedding FROM drawers WHERE embedding IS NOT NULL`)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	perSession := make(map[string]float64)
+	for rows.Next() {
+		var sessionID, hall string
+		var blob []byte
+		if err := rows.Scan(&sessionID, &hall, &blob); err != nil {
+			continue
+		}
+		vec, err := embeddings.Decode(blob)
+		if err != nil {
+			continue
+		}
+		sim := float64(embeddings.Cosine(qvec, vec))
+		var contribution float64
+		switch hall {
+		case "L0":
+			contribution = wL0 * sim
+		case "L1":
+			contribution = wL1 * sim
+		case "L2":
+			contribution = wL2 * sim
+		}
+		if mergeMode == "max" {
+			if contribution > perSession[sessionID] {
+				perSession[sessionID] = contribution
+			}
+		} else {
+			perSession[sessionID] += contribution
+		}
+	}
+
+	type sessionScore struct {
+		sessionID string
+		score     float64
+	}
+	ranked := make([]sessionScore, 0, len(perSession))
+	for id, s := range perSession {
+		ranked = append(ranked, sessionScore{id, s})
+	}
+	sort.Slice(ranked, func(i, j int) bool { return ranked[i].score > ranked[j].score })
+	if len(ranked) > limit {
+		ranked = ranked[:limit]
+	}
+
+	out := make([]search.SearchResult, 0, len(ranked))
+	for _, r := range ranked {
+		sv, ok := lcacheSessionsByID[r.sessionID]
+		content := ""
+		if ok {
+			content = sv.l0
+		}
+		out = append(out, search.SearchResult{
+			SourceFile: r.sessionID,
+			Content:    content,
+			Score:      r.score,
+		})
+	}
+	return out
+}
+
+type sessionVariants struct {
+	sessionID  string
+	l0, l1, l2 string
+}
+
+// makeSessionVariants returns the three L# views of a session:
+//   L0 = full (all turns with roles)
+//   L1 = user turns only (drops assistant verbosity)
+//   L2 = first 3 user turns (zero-cost summary proxy)
+//
+// Adapted from Schift's L# Cache (they hit 96% R@5 on LongMemEval pure
+// vector with 0.5*L1 + 0.3*L2 + 0.2*L0 weighting).
+func makeSessionVariants(session []Message) (l0, l1, l2 string) {
+	var l0Parts, userParts []string
+	userCount := 0
+	for _, m := range session {
+		l0Parts = append(l0Parts, m.Role+": "+m.Content)
+		if m.Role == "user" {
+			userParts = append(userParts, m.Content)
+			userCount++
+		}
+	}
+	l0 = strings.Join(l0Parts, "\n")
+	l1 = strings.Join(userParts, "\n")
+	if len(userParts) > 3 {
+		l2 = strings.Join(userParts[:3], "\n")
+	} else {
+		l2 = l1
+	}
+	return l0, l1, l2
 }
 
 // chunkSession: whole session as one drawer (best R@5 in testing).
