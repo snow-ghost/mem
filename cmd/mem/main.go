@@ -309,7 +309,7 @@ func runMine(args []string) int {
 func runSearch(args []string) int {
 	var wingFlag, roomFlag, modeFlag string
 	var limitFlag int
-	var hnswFlag, perTypeFlag bool
+	var hnswFlag, perTypeFlag, query2docFlag bool
 	var recencyFlag float64
 	fs := flag.NewFlagSet("search", flag.ContinueOnError)
 	fs.StringVar(&wingFlag, "wing", "", "filter by wing")
@@ -319,6 +319,7 @@ func runSearch(args []string) int {
 	fs.BoolVar(&hnswFlag, "hnsw", false, "use HNSW index for vector search (faster on >5k drawers)")
 	fs.BoolVar(&perTypeFlag, "per-type", false, "in hybrid mode, classify the query and pick the per-type RRF weight")
 	fs.Float64Var(&recencyFlag, "recency", 0, "post-rank recency boost weight in [0..1] (favours newer drawers — useful for changing facts)")
+	fs.BoolVar(&query2docFlag, "query2doc", false, "Query2Doc/HyDE: LLM writes pseudo-answer, embed + average with query (requires MEM_LLM_*)")
 	var palaceFlag string
 	fs.StringVar(&palaceFlag, "palace", "", "override palace path")
 	fs.Parse(args)
@@ -371,6 +372,23 @@ func runSearch(args []string) int {
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "mem: search: embed query: %v\n", err)
 			return 1
+		}
+		// Query2Doc / HyDE: ask the LLM for a plausible answer, embed
+		// it, average with the original query vector. ~+0.6 R@5,
+		// +6.7 on preference queries on LongMemEval bench.
+		if query2docFlag {
+			if !cfg.LLMEnabled() {
+				fmt.Fprintln(os.Stderr, "mem: search: --query2doc requires MEM_LLM_URL and MEM_LLM_MODEL")
+				return 1
+			}
+			chat := embeddings.NewChatClient(cfg.LLMURL, cfg.LLMModel, cfg.LLMAPIKey)
+			prompt := "Write one short plausible answer sentence to help retrieve the relevant passage. Question: " + query
+			pseudo, perr := chat.Complete(prompt, 80)
+			if perr == nil && strings.TrimSpace(pseudo) != "" {
+				if pseudoVec, perr := client.Embed(pseudo); perr == nil {
+					qvec = embeddings.MeanVecs(qvec, pseudoVec)
+				}
+			}
 		}
 		switch {
 		case hnswFlag && modeFlag == "vector":

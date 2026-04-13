@@ -99,6 +99,11 @@ export MEM_RERANK_MODEL=BAAI/bge-reranker-v2-m3
 # Recency boost — favour newer drawers (great for changing facts)
 mem search "current geo-targeting setting" --recency 0.5
 
+# Query2Doc / HyDE — LLM writes pseudo-answer, embed + average with query
+export MEM_LLM_URL=https://your-endpoint/v1/chat/completions
+export MEM_LLM_MODEL=Qwen/Qwen3-Next-80B-A3B-Instruct
+mem search "what should I cook tonight" --mode hybrid --query2doc
+
 # Start MCP server (for Claude Code integration)
 mem mcp
 
