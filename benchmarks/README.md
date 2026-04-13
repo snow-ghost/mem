@@ -145,6 +145,7 @@ curl -sL https://github.com/snap-research/locomo/raw/main/data/locomo10.json \
 go build -o /tmp/locomo-bench ./benchmarks/locomo/
 /tmp/locomo-bench /tmp/locomo-data/locomo10.json
 # Optional: LOCOMO_CHUNK_SIZE=50 to tune grouping (default 50, ≈ whole session)
+# Optional: LOCOMO_MODE=hybrid + MEM_EMBEDDINGS_* for hybrid mode
 ```
 
 ### Evaluation method
@@ -154,28 +155,33 @@ go build -o /tmp/locomo-bench ./benchmarks/locomo/
   `source_file` is a CSV of its constituent `dia_id`s
 - A retrieval is a hit if any evidence `dia_id` appears in the drawer CSV
 
-### Current results (mem BM25, whole-session drawers)
+### Current results
 
-| Metric | Value |
-|---|---|
-| Recall@1 | 60.0% |
-| **Recall@5** | **88.2%** |
-| Recall@10 | 93.7% |
-| Non-adversarial R@5 | 86.8% |
-| Index build | 6.2s (5882 messages → 272 drawers) |
-| Search total | 3.3s (1986 queries) |
-| Avg query latency | 1.7ms |
-| **Full run** | **~11 seconds** |
+| Metric | BM25 | Hybrid (bge-m3 + RRF) |
+|---|---:|---:|
+| Recall@1 | **60.0%** | 59.0% |
+| **Recall@5** | 88.2% | **88.6%** |
+| Recall@10 | 93.7% | **95.6%** |
+| Non-adversarial R@5 | 86.8% | **87.5%** |
+| Index build | 6.2s | 6.2s + ~2 min embedding |
+| Avg query latency | 1.7ms | 4.5ms |
+| **Full run** | **~11s** | ~2m20s |
 
-#### Per-category Recall@5
+#### Per-category R@5: BM25 vs hybrid
 
-| Category | QAs | R@1 | R@5 |
-|---|---:|---:|---:|
-| adversarial | 446 | 66.6% | **93.0%** |
-| open-domain | 841 | 64.9% | **92.7%** |
-| temporal | 321 | 58.3% | 85.0% |
-| single-hop | 282 | 46.8% | 80.5% |
-| multi-hop | 96 | 31.2% | 59.4% |
+| Category | QAs | BM25 | Hybrid | Δ |
+|---|---:|---:|---:|---:|
+| multi-hop | 96 | 59.4% | **66.7%** | **+7.3** |
+| single-hop | 282 | 80.5% | **86.2%** | **+5.7** |
+| temporal | 321 | **85.0%** | 84.4% | -0.6 |
+| open-domain | 841 | **92.7%** | 91.4% | -1.3 |
+| adversarial | 446 | **93.0%** | 92.6% | -0.4 |
+
+LoCoMo's whole-session chunks already give BM25 strong signal on the
+high-volume categories (open-domain, adversarial), so hybrid's contribution
+is concentrated where it matters most: **multi-hop +7.3** (the hardest
+category) and **single-hop +5.7**. Recall@10 jumps from 93.7% to 95.6%,
+suggesting embeddings rescue evidence that fell out of the BM25 top-5.
 
 ### Chunk-size sweep (R@5)
 
