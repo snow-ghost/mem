@@ -8,9 +8,13 @@ import (
 	"strings"
 	"time"
 
+	"sort"
+	"sync"
+
 	"github.com/snow-ghost/mem/internal/config"
 	"github.com/snow-ghost/mem/internal/embeddings"
 	"github.com/snow-ghost/mem/internal/palace"
+	"github.com/snow-ghost/mem/internal/rerank"
 	"github.com/snow-ghost/mem/internal/search"
 )
 
@@ -45,12 +49,20 @@ func main() {
 		fmt.Fprintln(os.Stderr, "LME_MODE=vector|hybrid requires MEM_EMBEDDINGS_URL and MEM_EMBEDDINGS_MODEL")
 		os.Exit(1)
 	}
+	useRerank := os.Getenv("LME_RERANK") == "1"
+	if useRerank && !envCfg.RerankEnabled() {
+		fmt.Fprintln(os.Stderr, "LME_RERANK=1 requires MEM_RERANK_URL and MEM_RERANK_MODEL")
+		os.Exit(1)
+	}
 
 	fmt.Println("=== LongMemEval Benchmark for mem ===")
 	fmt.Printf("Dataset: %s\n", dataFile)
 	fmt.Printf("Mode: %s\n", mode)
 	if useEmbeddings {
 		fmt.Printf("Embeddings: %s\n", envCfg.EmbeddingsModel)
+	}
+	if useRerank {
+		fmt.Printf("Reranker: %s (LME_RERANK=1)\n", envCfg.RerankModel)
 	}
 	fmt.Println()
 
@@ -212,20 +224,93 @@ func main() {
 	var sweep []weightResult
 	total := len(questions)
 
+	// Reranker (optional): retrieve a wider candidate set, then re-score
+	// the top N with a cross-encoder. POOL is how many candidates we ask
+	// the first stage for; we always return top-10 for evaluation.
+	var rerankClient *rerank.Client
+	rerankPool := 20
+	if useRerank {
+		rerankClient = rerank.NewClient(envCfg)
+		if v := os.Getenv("LME_RERANK_POOL"); v != "" {
+			fmt.Sscanf(v, "%d", &rerankPool)
+		}
+	}
+	candidateLimit := 10
+	if useRerank {
+		candidateLimit = rerankPool
+	}
+
+	rerankWorkers := 8
+	if v := os.Getenv("LME_RERANK_WORKERS"); v != "" {
+		fmt.Sscanf(v, "%d", &rerankWorkers)
+	}
+
 	runSweepWeight := func(w float64) weightResult {
 		wr := weightResult{weight: w, typeHits: make(map[string][2]int)}
 		swStart := time.Now()
-		for _, q := range questions {
-			answerText := normalizeAnswer(q.Answer)
+
+		// Per-query results, then optionally reranked in parallel.
+		perQResults := make([][]search.SearchResult, len(questions))
+		for i, q := range questions {
 			var results []search.SearchResult
 			qvec := queryVecs[q.ID]
 			switch {
 			case mode == "vector" && qvec != nil:
-				results, _ = search.SearchVector(d, qvec, 0, 0, 10)
+				results, _ = search.SearchVector(d, qvec, 0, 0, candidateLimit)
 			case mode == "hybrid" && qvec != nil:
-				results, _ = search.SearchHybridWeighted(d, q.Question, qvec, 0, 0, 10, w)
+				results, _ = search.SearchHybridWeighted(d, q.Question, qvec, 0, 0, candidateLimit, w)
 			default:
-				results, _ = search.Search(d, q.Question, 0, 0, 10)
+				results, _ = search.Search(d, q.Question, 0, 0, candidateLimit)
+			}
+			perQResults[i] = results
+		}
+
+		// Stage 2: cross-encoder re-rank in parallel. Each query is one
+		// HTTP call with `rerankPool` documents. Failed reranks fall back
+		// to first-stage ranking (no-op).
+		if useRerank {
+			var wg sync.WaitGroup
+			jobs := make(chan int)
+			for w := 0; w < rerankWorkers; w++ {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					for i := range jobs {
+						results := perQResults[i]
+						if len(results) <= 1 {
+							continue
+						}
+						docs := make([]string, len(results))
+						for j, r := range results {
+							docs[j] = truncateForEmbedding(r.Content, 1500)
+						}
+						scores, err := rerankClient.Score(questions[i].Question, docs)
+						if err != nil {
+							continue
+						}
+						for j := range results {
+							results[j].Score = scores[j]
+						}
+						sort.Slice(results, func(a, b int) bool {
+							return results[a].Score > results[b].Score
+						})
+						perQResults[i] = results
+					}
+				}()
+			}
+			for i := range questions {
+				jobs <- i
+			}
+			close(jobs)
+			wg.Wait()
+		}
+
+		// Tally hits
+		for i, q := range questions {
+			answerText := normalizeAnswer(q.Answer)
+			results := perQResults[i]
+			if useRerank && len(results) > 10 {
+				results = results[:10]
 			}
 
 			found5, found10 := false, false

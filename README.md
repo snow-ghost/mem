@@ -168,17 +168,19 @@ for reproduction steps.
 
 ### LongMemEval (ICLR 2025) — 500 questions, 6 question types
 
-| Metric | BM25 + stemming (offline) | Hybrid (BM25 + bge-m3, weighted RRF 0.70) |
-|---|---:|---:|
-| **Recall@5** | **71.0%** | **74.6%** |
-| Recall@1 | 44.4% | 48.0% |
-| Recall@10 | 77.2% | 79.2% |
-| Avg query latency | 8.6 ms | 67 ms |
+| Metric | BM25 + stemming | Hybrid (RRF 0.7) | Hybrid + rerank |
+|---|---:|---:|---:|
+| **Recall@1** | 44.4% | 48.0% | **52.6%** |
+| **Recall@5** | 71.0% | **74.6%** | 74.6% |
+| **Recall@10** | 77.2% | 79.2% | **80.8%** |
+| Avg query latency | 8.6 ms | 67 ms | 137 ms |
 
 Tokenizer applies Porter step 1a/1b stemming — `+1.6 R@5` on BM25 alone
-without any external dependency. Hybrid mode adds another `+3.6 R@5` on top
-via weighted Reciprocal Rank Fusion (0.7 BM25 / 0.3 vector). Best wins on
-preference (+6.7), temporal-reasoning (+4.5), knowledge-update (+5.1).
+without any external dependency. Hybrid mode adds another `+3.6 R@5` via
+weighted Reciprocal Rank Fusion (0.7 BM25 / 0.3 vector). Cross-encoder
+reranking (`BAAI/bge-reranker-v2-m3`) on top of hybrid adds **+4.6 R@1**
+and **+1.6 R@10** — useful for top-1-driven workflows like LLM
+retrieval-augmented answering.
 
 ### LoCoMo (Snap Research) — 10 long-form conversations, 1986 QAs
 
@@ -213,8 +215,9 @@ internal/
   config/              Configuration (env vars, paths)
   db/                  SQLite schema + connection
   palace/              Wings, rooms, drawers, tunnels
-  search/              BM25 + vector + hybrid (RRF) search
+  search/              BM25 + vector + hybrid (RRF) search, Porter stemmer
   embeddings/          Optional OpenAI-compatible client + blob serializer
+  rerank/              Optional Cohere-compatible cross-encoder client
   kg/                  Temporal knowledge graph + contradiction detection
   layers/              4-layer memory stack (L0 identity, L1 compression, wake-up)
   miner/               File and conversation mining (Claude JSONL, ChatGPT, Slack, plain text)

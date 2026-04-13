@@ -54,18 +54,25 @@ LocalAI, llama.cpp server, cloud.ru foundation-models, etc.).
 
 ### Current results
 
-Two modes measured: pure BM25 (default, offline) and hybrid BM25 + bge-m3 via
-weighted Reciprocal Rank Fusion (k=60). Tokenizer applies Porter step 1a/1b
-stemming (e.g., `running` → `run`, `ponies` → `poni`).
+Three modes measured: pure BM25 (default, offline), hybrid BM25 + bge-m3 via
+weighted Reciprocal Rank Fusion (k=60), and hybrid + cross-encoder rerank
+(`BAAI/bge-reranker-v2-m3`). Tokenizer applies Porter step 1a/1b stemming.
 
-| Metric | BM25 | Hybrid 0.5/0.5 | Hybrid 0.7/0.3 |
+| Metric | BM25 | Hybrid 0.7/0.3 | Hybrid 0.7 + rerank |
 |---|---:|---:|---:|
-| Recall@1 | 44.4% | 48.8% | 48.0% |
-| **Recall@5** | **71.0%** | 73.4% | **74.6%** |
-| Recall@10 | 77.2% | 79.2% | 79.2% |
+| **Recall@1** | 44.4% | 48.0% | **52.6%** |
+| **Recall@5** | 71.0% | 74.6% | **74.6%** |
+| **Recall@10** | 77.2% | 79.2% | **80.8%** |
 | BM25 index build | 26s | 26s | 26s |
 | Embedding index build | — | ~5 min | ~5 min |
-| Avg query latency | 8.6ms | 67ms | 67ms |
+| Avg query latency | 8.6ms | 67ms | 137ms |
+
+Stemming alone gives BM25 **+1.6 R@5** (69.4 → 71.0) without any model
+dependency. Hybrid mode adds another **+3.6 R@5** on top. Cross-encoder
+reranking adds **+4.6 R@1** and **+1.6 R@10** but doesn't lift R@5 — the
+reranker is excellent at putting the right answer at #1 and at rescuing
+answers that fell outside top-5, but it doesn't fundamentally widen what
+the first stage already considers.
 
 Stemming alone gives BM25 **+1.6 R@5** (69.4 → 71.0) without any model
 dependency. Hybrid mode adds another **+3.6 R@5** on top. Best RRF weight
@@ -104,6 +111,24 @@ stronger BM25 signal earns more trust in the fusion. Set
 `LME_RRF_WEIGHTS=0.4,0.5,0.6,0.7` to reproduce the sweep in one embedding
 pass (retrieval loop reruns per weight against the same already-embedded
 palace, ~5s per weight).
+
+#### Cross-encoder reranking
+
+Set `MEM_RERANK_URL`, `MEM_RERANK_MODEL` (Cohere-compatible `/v1/rerank`,
+e.g., `BAAI/bge-reranker-v2-m3` via cloud.ru), then `LME_RERANK=1` on
+top of any first-stage mode. The bench retrieves top-N candidates
+(`LME_RERANK_POOL=20`, default) from the first stage, sends them with the
+query to the reranker (`LME_RERANK_WORKERS=8` parallel calls), then takes
+the top-10 by reranker score.
+
+| Stage | R@1 | R@5 | R@10 |
+|---|---:|---:|---:|
+| Hybrid 0.7 (no rerank) | 48.0% | 74.6% | 79.2% |
+| Hybrid 0.7 + rerank | **52.6%** | 74.6% | **80.8%** |
+
+Reranker buys you **+4.6 R@1** and **+1.6 R@10** but doesn't move R@5.
+Useful when downstream consumers care most about the top-1 answer
+(LLMs answering with retrieval, single-best-snippet UIs).
 
 #### Comparison with other memory systems
 
