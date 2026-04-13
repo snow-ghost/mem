@@ -72,6 +72,35 @@ func SearchHybrid(d *db.DB, query string, queryVec []float32, wingID, roomID int
 	return SearchHybridWeighted(d, query, queryVec, wingID, roomID, limit, 0.5)
 }
 
+// DefaultPerTypeWeights is the LongMemEval-derived BM25 weight per
+// question type (oracle sweep result). Used by SearchHybridAuto when
+// the caller doesn't supply a custom map. Knowledge-update questions
+// reformulate facts so vector helps more (low BM25 weight); single-
+// session-* are recall-of-specifics queries where BM25 wins.
+var DefaultPerTypeWeights = map[QuestionType]float64{
+	TypeKnowledgeUpdate:         0.30,
+	TypeSingleSessionPreference: 0.70,
+	TypeTemporalReasoning:       0.70,
+	TypeMultiSession:            0.70,
+	TypeSingleSessionUser:       0.90,
+	TypeSingleSessionAssistant:  0.90,
+}
+
+// SearchHybridAuto classifies the query, looks up the per-type BM25
+// weight (from DefaultPerTypeWeights or override), and runs weighted
+// RRF. Falls back to weight 0.7 if the predicted type isn't in the map.
+func SearchHybridAuto(d *db.DB, query string, queryVec []float32, wingID, roomID int64, limit int, weights map[QuestionType]float64) ([]SearchResult, error) {
+	if weights == nil {
+		weights = DefaultPerTypeWeights
+	}
+	t := ClassifyQuestion(query)
+	w, ok := weights[t]
+	if !ok {
+		w = 0.7
+	}
+	return SearchHybridWeighted(d, query, queryVec, wingID, roomID, limit, w)
+}
+
 // SearchHybridWeighted is RRF with adjustable BM25 weight in [0, 1].
 // The vector contribution is weighted (1 - bm25Weight). Setting bm25Weight=1
 // degenerates to BM25-only ranking, 0 to vector-only.

@@ -97,6 +97,33 @@ embedding to avoid hitting server-side input-length issues.
 Stemming with hybrid: most categories improve, only single-session-assistant
 regresses slightly (the same ~2pp gap as without stemming).
 
+#### Per-type RRF weights (oracle vs classifier)
+
+Sweep over BM25 weights {0.30, 0.50, 0.70, 0.90} on stemmed hybrid:
+
+| Type | Best weight | R@5 |
+|---|---:|---:|
+| **knowledge-update** | **0.30** | 89.7% |
+| single-session-preference | 0.70 | 66.7% |
+| temporal-reasoning | 0.70 | 59.4% |
+| multi-session | 0.70 | 69.9% |
+| single-session-assistant | 0.90 | 98.2% |
+| single-session-user | 0.90 | 85.7% |
+| **Aggregate (oracle per-type)** | — | **75.4%** |
+| Single global best (0.70) | 0.70 | 74.6% |
+| **Classifier-driven (heuristic)** | — | **74.2%** |
+
+Striking asymmetry: knowledge-update wants vector-heavy fusion (0.30),
+single-session-* want BM25-heavy (0.90). Oracle per-type captures
++0.8 R@5 over the single global best.
+
+The catch: the heuristic classifier's 53% type accuracy isn't enough.
+Especially on knowledge-update (which it never predicts), the wrong
+weight is *worse* than the global default. Net classifier-driven is
+**below** the single-weight baseline. The infra is in place for a
+real (LLM-based or embedding-anchored) classifier to plug in:
+`search.SearchHybridAuto(..., DefaultPerTypeWeights)`.
+
 #### RRF weight sweep with stemming
 
 | Weight | R@1 | R@5 | R@10 |

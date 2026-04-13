@@ -427,6 +427,7 @@ func main() {
 				typesSeen[t] = true
 			}
 		}
+		bestWeightForType := make(map[string]float64)
 		oracleHit5 := 0
 		oracleTotal := 0
 		for t := range typesSeen {
@@ -439,6 +440,7 @@ func main() {
 					bestW = wr.weight
 				}
 			}
+			bestWeightForType[t] = bestW
 			fmt.Printf("%-30s %-8.2f %5.1f%% (%d/%d)\n",
 				t, bestW, float64(bestHit)/float64(bestN)*100, bestHit, bestN)
 			oracleHit5 += bestHit
@@ -446,6 +448,70 @@ func main() {
 		}
 		fmt.Printf("Aggregate oracle per-type R@5: %.1f%% (%d/%d)\n",
 			float64(oracleHit5)/float64(oracleTotal)*100, oracleHit5, oracleTotal)
+
+		// Classifier-driven per-type weights: for each query predict the
+		// type via search.ClassifyQuestion, then look up that type's
+		// oracle-best weight and read the corresponding sweep result.
+		// This shows how much of the oracle gain a real classifier captures.
+		// Build per-(weight, qid) lookup of whether that query was a hit at R@5.
+		hitAt := make(map[float64]map[string]bool, len(sweep))
+		for _, wr := range sweep {
+			hitAt[wr.weight] = make(map[string]bool, total)
+		}
+		// Re-evaluate by replaying: a query was a hit iff results[i] within top-5
+		// matched containsAnswer. We can't reach into the inner state from here,
+		// but we can re-run the per-question loop using the per-weight maps we
+		// already collected aggregate hit counts for. That doesn't give us the
+		// per-question outcome.
+		//
+		// Cheaper proxy: for each *type*, count the predicted-classifier
+		// distribution and assume the type's per-weight R@5 applies uniformly
+		// (i.e., the classifier picks weight based on predicted type, and we
+		// score using the *predicted* type's oracle-best weight against the
+		// *actual* type's sweep R@5 at that weight).
+		fmt.Printf("\n=== CLASSIFIER-DRIVEN PER-TYPE WEIGHTS ===\n")
+		// For each (predictedType, actualType) pair count queries.
+		conf := make(map[string]map[string]int) // pred -> actual -> count
+		for _, q := range questions {
+			pred := string(search.ClassifyQuestion(q.Question))
+			if conf[pred] == nil {
+				conf[pred] = make(map[string]int)
+			}
+			conf[pred][q.Type]++
+		}
+		// For each predicted type bucket, the classifier picks bestWeightForType[pred].
+		// Then those queries get scored at that weight. Sum up total hits.
+		// Use per-(weight, actualType) hit fraction from sweep.
+		sweepByWeight := make(map[float64]weightResult)
+		for _, wr := range sweep {
+			sweepByWeight[wr.weight] = wr
+		}
+		classifierHit := 0
+		classifierTotal := 0
+		for pred, actuals := range conf {
+			w := bestWeightForType[pred]
+			// Default to a sweep weight that exists if pred wasn't in sweep
+			if _, ok := sweepByWeight[w]; !ok {
+				w = bestWeightForType["single-session-user"]
+			}
+			wr := sweepByWeight[w]
+			for actual, n := range actuals {
+				c := wr.typeHits[actual]
+				if c[1] == 0 {
+					continue
+				}
+				rate := float64(c[0]) / float64(c[1])
+				expected := int(rate*float64(n) + 0.5)
+				classifierHit += expected
+				classifierTotal += n
+			}
+		}
+		if classifierTotal > 0 {
+			fmt.Printf("Estimated classifier-driven per-type R@5: %.1f%% (%d/%d)\n",
+				float64(classifierHit)/float64(classifierTotal)*100,
+				classifierHit, classifierTotal)
+			fmt.Printf("(estimate uses per-(weight, actual-type) hit rate × predicted-type count)\n")
+		}
 		fmt.Printf("\nReporting best weight (%.2f) below.\n", best.weight)
 	}
 
