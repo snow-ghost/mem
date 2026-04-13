@@ -150,6 +150,9 @@ func CountDrawersWithEmbeddings(d *db.DB) (int, error) {
 // Caller decides when this is worth doing: at small scale (<5k drawers)
 // SearchVector's full scan is competitive with HNSW; at larger scale
 // HNSW gives ~5x speedup at 10k and ~25x at 50k (see hnsw_test.go).
+//
+// For repeated CLI invocations prefer LoadOrBuildHNSW which transparently
+// caches the graph in the hnsw_cache table.
 func BuildHNSWFromPalace(d *db.DB) (*HNSWIndex, error) {
 	rows, err := d.Query("SELECT id, embedding FROM drawers WHERE embedding IS NOT NULL ORDER BY id")
 	if err != nil {
@@ -173,6 +176,59 @@ func BuildHNSWFromPalace(d *db.DB) (*HNSWIndex, error) {
 		}
 		idx.Insert(id, vec)
 	}
+	return idx, nil
+}
+
+// LoadHNSWFromCache returns a previously persisted HNSW index from the
+// hnsw_cache table, or (nil, nil) if no cache row exists. The check
+// against drawer_count is a cheap sanity guard — if the embedded-drawer
+// count has changed since we serialized, the cache is stale and the
+// caller should rebuild.
+func LoadHNSWFromCache(d *db.DB, name string) (*HNSWIndex, error) {
+	var blob []byte
+	var cachedCount int
+	err := d.QueryRow("SELECT blob, drawer_count FROM hnsw_cache WHERE name = ?", name).
+		Scan(&blob, &cachedCount)
+	if err != nil {
+		return nil, nil
+	}
+	currentCount, _ := CountDrawersWithEmbeddings(d)
+	if currentCount != cachedCount {
+		return nil, nil // stale
+	}
+	return LoadHNSW(blob)
+}
+
+// SaveHNSWToCache serializes the index to the hnsw_cache table under
+// the given name.
+func SaveHNSWToCache(d *db.DB, name string, idx *HNSWIndex) error {
+	if idx == nil || idx.Size() == 0 {
+		return nil
+	}
+	blob, err := idx.Marshal()
+	if err != nil {
+		return err
+	}
+	_, err = d.Exec(`INSERT INTO hnsw_cache (name, drawer_count, dim, blob, updated_at)
+		VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+		ON CONFLICT(name) DO UPDATE SET drawer_count=excluded.drawer_count, dim=excluded.dim,
+			blob=excluded.blob, updated_at=excluded.updated_at`,
+		name, idx.Size(), idx.dim, blob)
+	return err
+}
+
+// LoadOrBuildHNSW returns a cached HNSW index when available and not
+// stale, or builds a fresh one and persists it. `name` is a logical
+// label; "default" works for single-index palaces.
+func LoadOrBuildHNSW(d *db.DB, name string) (*HNSWIndex, error) {
+	if idx, _ := LoadHNSWFromCache(d, name); idx != nil {
+		return idx, nil
+	}
+	idx, err := BuildHNSWFromPalace(d)
+	if err != nil || idx == nil {
+		return idx, err
+	}
+	_ = SaveHNSWToCache(d, name, idx)
 	return idx, nil
 }
 

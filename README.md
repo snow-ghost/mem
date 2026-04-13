@@ -140,19 +140,64 @@ For stronger top-1 results, also set `MEM_RERANK_URL` + `MEM_RERANK_MODEL`
 The MCP `mem_search` tool accepts a `mode` argument that selects between
 bm25, vector, and hybrid retrieval at call time.
 
-For very large palaces (>5k drawers with embeddings), pass `--hnsw` to
-`mem search --mode vector` to use a pure-Go HNSW index. Microbenchmarks
-on dim=128 random vectors:
+For large palaces (any scale where you do repeated queries), pass `--hnsw`
+to `mem search --mode vector` to use a pure-Go HNSW index:
 
 | Drawers | Full scan | HNSW | Speedup |
 |---:|---:|---:|---:|
-| 1k | 0.35 ms | 0.40 ms | (slower — HNSW overhead dominates) |
-| 10k | 2.99 ms | 0.56 ms | **5.3×** |
-| 50k | 17.96 ms | 0.75 ms | **24×** |
+| 1k (real DB) | 5.7 ms | 0.7 ms | **8.1×** |
+| 10k (in-mem) | 2.99 ms | 0.56 ms | **5.3×** |
+| 50k (in-mem) | 17.96 ms | 0.75 ms | **24×** |
 
-The HNSW index is built lazily in memory from the SQLite blob column
-on each `mem search --hnsw` invocation; no extra persistence layer.
-Recall@10 on 1000 random vectors: 98.6%.
+In the real-DB path the speedup is even larger than the in-memory
+microbench suggests because `SearchVector` decodes the SQLite BLOB on
+every query while HNSW decodes once during build. The HNSW index is
+**persisted in the `hnsw_cache` SQLite table** — first query after a
+mine pays the build cost (~700ms / 1k vectors), subsequent queries
+load the graph in milliseconds. Recall@10 on 1k random vectors: 98.6%.
+
+#### Local CPU embeddings via llama.cpp
+
+For an air-gapped or cost-controlled setup, run [llama.cpp](https://github.com/ggerganov/llama.cpp)'s
+HTTP server with a small embedding model. Tested with `BAAI/bge-small-en-v1.5`
+(~30MB GGUF, ~50 emb/sec on a modern CPU):
+
+```bash
+# 1. Download a small embedding model (one-time)
+huggingface-cli download CompendiumLabs/bge-small-en-v1.5-gguf bge-small-en-v1.5-q8_0.gguf \
+  --local-dir ~/models/
+
+# 2. Run llama-server in embedding mode (note: --embeddings is REQUIRED)
+llama-server -m ~/models/bge-small-en-v1.5-q8_0.gguf \
+  --embeddings --port 8091 --pooling mean
+
+# 3. Point mem at it
+export MEM_EMBEDDINGS_URL=http://localhost:8091/v1/embeddings
+export MEM_EMBEDDINGS_MODEL=bge-small-en-v1.5-q8_0
+# (no API key needed for local server)
+
+# 4. Verify
+mem benchmark --drawers 100 --queries 20
+```
+
+For reranking on CPU (~5× slower than embedding so use sparingly):
+
+```bash
+llama-server -m ~/models/bge-reranker-v2-m3-q4.gguf \
+  --reranking --port 8092
+
+export MEM_RERANK_URL=http://localhost:8092/v1/rerank
+export MEM_RERANK_MODEL=bge-reranker-v2-m3
+```
+
+Notes:
+- A general chat model (LFM2.5, Qwen, Llama, etc.) loaded **without**
+  `--embeddings` will return `501 not_supported_error`. The flag is
+  required and changes the server's pooling/output behavior.
+- For a chat LLM you'd need a separate inference server anyway —
+  embedding work is best on a dedicated tiny model.
+- On CPU, dimensions matter: `bge-small-en-v1.5` is 384-d (5× smaller
+  than `bge-m3`'s 1920-d), so HNSW build/search are also 5× faster.
 
 ### Knowledge Graph
 

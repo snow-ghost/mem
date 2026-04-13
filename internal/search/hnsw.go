@@ -2,6 +2,8 @@ package search
 
 import (
 	"container/heap"
+	"encoding/binary"
+	"errors"
 	"math"
 	"math/rand"
 	"sync"
@@ -302,6 +304,122 @@ func cosineDist(a, b []float32) float32 {
 	}
 	sim := dot / float32(math.Sqrt(float64(na))*math.Sqrt(float64(nb)))
 	return 1 - sim
+}
+
+// Marshal serializes the index into a compact binary blob suitable for
+// storage in a SQLite BLOB column. Format:
+//
+//	magic(4)  = 'HNS1'
+//	dim(4)    = embedding dim (uint32 BE)
+//	count(4)  = #nodes (uint32 BE)
+//	maxLevel(4)
+//	enterPt(4)
+//	for each node:
+//	    intID(4) is implicit by position
+//	    extID(8) int64 BE
+//	    nLevels(2) uint16 BE
+//	    for each level:
+//	        nNeighbors(2) uint16 BE
+//	        neighbors[ni] (4 bytes each, uint32 BE — internal IDs)
+//	    vec[dim] float32 little-endian (matches embeddings.Encode tail)
+func (h *HNSWIndex) Marshal() ([]byte, error) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	if len(h.nodes) == 0 {
+		return nil, errors.New("empty index")
+	}
+	// First pass to size the buffer
+	size := 20 // header
+	for _, n := range h.nodes {
+		size += 8 + 2 // extID + nLevels
+		for _, lvl := range n.neighbors {
+			size += 2 + 4*len(lvl)
+		}
+		size += 4 * h.dim
+	}
+	buf := make([]byte, size)
+	copy(buf[0:4], []byte("HNS1"))
+	binary.BigEndian.PutUint32(buf[4:8], uint32(h.dim))
+	binary.BigEndian.PutUint32(buf[8:12], uint32(len(h.nodes)))
+	binary.BigEndian.PutUint32(buf[12:16], uint32(h.maxLevel))
+	binary.BigEndian.PutUint32(buf[16:20], uint32(h.enterPoint))
+	off := 20
+	for i, n := range h.nodes {
+		extID := h.intToID[i]
+		binary.BigEndian.PutUint64(buf[off:off+8], uint64(extID))
+		off += 8
+		binary.BigEndian.PutUint16(buf[off:off+2], uint16(len(n.neighbors)))
+		off += 2
+		for _, lvl := range n.neighbors {
+			binary.BigEndian.PutUint16(buf[off:off+2], uint16(len(lvl)))
+			off += 2
+			for _, nb := range lvl {
+				binary.BigEndian.PutUint32(buf[off:off+4], uint32(nb))
+				off += 4
+			}
+		}
+		for _, f := range n.vec {
+			binary.LittleEndian.PutUint32(buf[off:off+4], math.Float32bits(f))
+			off += 4
+		}
+	}
+	return buf, nil
+}
+
+// LoadHNSW reconstructs an index from a Marshal()-produced blob.
+func LoadHNSW(buf []byte) (*HNSWIndex, error) {
+	if len(buf) < 20 || string(buf[0:4]) != "HNS1" {
+		return nil, errors.New("invalid HNSW blob")
+	}
+	dim := int(binary.BigEndian.Uint32(buf[4:8]))
+	count := int(binary.BigEndian.Uint32(buf[8:12]))
+	maxLevel := int(int32(binary.BigEndian.Uint32(buf[12:16])))
+	ep := int(int32(binary.BigEndian.Uint32(buf[16:20])))
+	idx := NewHNSWIndex(dim)
+	idx.nodes = make([]*hnswNode, count)
+	idx.intToID = make([]int64, count)
+	idx.idToInt = make(map[int64]int, count)
+	idx.maxLevel = maxLevel
+	idx.enterPoint = ep
+	off := 20
+	for i := 0; i < count; i++ {
+		if off+8+2 > len(buf) {
+			return nil, errors.New("truncated blob")
+		}
+		extID := int64(binary.BigEndian.Uint64(buf[off : off+8]))
+		off += 8
+		nLevels := int(binary.BigEndian.Uint16(buf[off : off+2]))
+		off += 2
+		node := &hnswNode{neighbors: make([][]int, nLevels)}
+		for l := 0; l < nLevels; l++ {
+			if off+2 > len(buf) {
+				return nil, errors.New("truncated blob (neighbors header)")
+			}
+			nNb := int(binary.BigEndian.Uint16(buf[off : off+2]))
+			off += 2
+			if off+4*nNb > len(buf) {
+				return nil, errors.New("truncated blob (neighbors body)")
+			}
+			lvl := make([]int, nNb)
+			for k := 0; k < nNb; k++ {
+				lvl[k] = int(int32(binary.BigEndian.Uint32(buf[off : off+4])))
+				off += 4
+			}
+			node.neighbors[l] = lvl
+		}
+		if off+4*dim > len(buf) {
+			return nil, errors.New("truncated blob (vector)")
+		}
+		node.vec = make([]float32, dim)
+		for k := 0; k < dim; k++ {
+			node.vec[k] = math.Float32frombits(binary.LittleEndian.Uint32(buf[off : off+4]))
+			off += 4
+		}
+		idx.nodes[i] = node
+		idx.intToID[i] = extID
+		idx.idToInt[extID] = i
+	}
+	return idx, nil
 }
 
 // Heap helpers for HNSW search ----------------------------------------

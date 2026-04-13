@@ -415,6 +415,37 @@ func main() {
 				wr.searchDuration.Round(time.Millisecond),
 				marker)
 		}
+
+		// Per-type oracle: pick the weight that maximizes R@5 for each
+		// question type independently, then aggregate. This is the upper
+		// bound achievable with classifier-driven per-type weighting.
+		fmt.Printf("\n=== PER-TYPE ORACLE WEIGHTS ===\n")
+		fmt.Printf("%-30s %-8s %-8s %s\n", "type", "weight", "R@5", "n")
+		typesSeen := make(map[string]bool)
+		for _, wr := range sweep {
+			for t := range wr.typeHits {
+				typesSeen[t] = true
+			}
+		}
+		oracleHit5 := 0
+		oracleTotal := 0
+		for t := range typesSeen {
+			var bestW float64
+			bestHit, bestN := -1, 0
+			for _, wr := range sweep {
+				c := wr.typeHits[t]
+				if c[0] > bestHit {
+					bestHit, bestN = c[0], c[1]
+					bestW = wr.weight
+				}
+			}
+			fmt.Printf("%-30s %-8.2f %5.1f%% (%d/%d)\n",
+				t, bestW, float64(bestHit)/float64(bestN)*100, bestHit, bestN)
+			oracleHit5 += bestHit
+			oracleTotal += bestN
+		}
+		fmt.Printf("Aggregate oracle per-type R@5: %.1f%% (%d/%d)\n",
+			float64(oracleHit5)/float64(oracleTotal)*100, oracleHit5, oracleTotal)
 		fmt.Printf("\nReporting best weight (%.2f) below.\n", best.weight)
 	}
 

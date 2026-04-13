@@ -85,6 +85,43 @@ func TestHNSW_GivenEmptyIndex_WhenSearched_ThenEmpty(t *testing.T) {
 	}
 }
 
+func TestHNSW_GivenIndex_WhenMarshaledAndLoaded_ThenSameTopK(t *testing.T) {
+	const N = 200
+	const dim = 32
+	rng := rand.New(rand.NewSource(11))
+	vecs := make([][]float32, N)
+	idx := NewHNSWIndex(dim)
+	for i := 0; i < N; i++ {
+		vecs[i] = randVec(rng, dim)
+		idx.Insert(int64(i+1), vecs[i])
+	}
+	blob, err := idx.Marshal()
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	loaded, err := LoadHNSW(blob)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if loaded.Size() != idx.Size() {
+		t.Fatalf("size mismatch: got %d want %d", loaded.Size(), idx.Size())
+	}
+	// Exact same top-5 ordering for 30 random queries
+	for q := 0; q < 30; q++ {
+		query := randVec(rng, dim)
+		a := idx.Search(query, 5, 0)
+		b := loaded.Search(query, 5, 0)
+		if len(a) != len(b) {
+			t.Fatalf("len mismatch: %d vs %d", len(a), len(b))
+		}
+		for i := range a {
+			if a[i] != b[i] {
+				t.Errorf("query %d pos %d: orig=%d loaded=%d", q, i, a[i], b[i])
+			}
+		}
+	}
+}
+
 // fullScan is the baseline brute-force we measure HNSW against.
 func fullScan(query []float32, vecs [][]float32, ids []int64, k int) []int64 {
 	type sd struct {

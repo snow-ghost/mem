@@ -261,6 +261,26 @@ is concentrated where it matters most: **multi-hop +7.3** (the hardest
 category) and **single-hop +5.7**. Recall@10 jumps from 93.7% to 95.6%,
 suggesting embeddings rescue evidence that fell out of the BM25 top-5.
 
+#### Rerank on LoCoMo: large regression (metric-mismatch finding)
+
+Adding cross-encoder rerank (`LOCOMO_RERANK=1`) on top of hybrid causes
+a **R@5 drop from 88.6% → 70.0%** (-18.6 pp), with the largest losses
+on open-domain (-24.7), adversarial (-23.3), and multi-hop (-21.9).
+
+This is a metric mismatch, not a reranker failure. LoCoMo's evidence
+match is `dia_id`-based (we check whether the *specific* message ID
+that contains the answer appears in the drawer's `source_file` CSV).
+The reranker scores by *content relevance to the query* — it
+correctly picks the most topically relevant session, but that's not
+necessarily the session containing the target `dia_id`.
+
+LongMemEval's evidence check is *answer-text presence* in the drawer,
+which lines up with content relevance — so rerank helps there (+4.6
+R@1, +1.6 R@10) and hurts here. **Rule of thumb:** cross-encoder
+rerank pays off when the downstream consumer cares about content
+relevance (LLM RAG, single-snippet answers); it doesn't pay off when
+your evaluation pivots on a structural property of the chunk.
+
 ### Chunk-size sweep (R@5)
 
 | Chunk size | Drawers | R@5 |

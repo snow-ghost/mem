@@ -325,7 +325,7 @@ func runSearch(args []string) int {
 			return 1
 		}
 		if hnswFlag && modeFlag == "vector" {
-			idx, ierr := search.BuildHNSWFromPalace(d)
+			idx, ierr := search.LoadOrBuildHNSW(d, "default")
 			if ierr != nil || idx == nil {
 				fmt.Fprintln(os.Stderr, "mem: search: HNSW build failed, falling back to full scan")
 				results, err = search.SearchVector(d, qvec, wingID, roomID, limitFlag)

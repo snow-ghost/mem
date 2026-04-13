@@ -75,6 +75,14 @@ CREATE TABLE IF NOT EXISTS triples (
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS hnsw_cache (
+    name TEXT PRIMARY KEY,
+    drawer_count INTEGER NOT NULL,
+    dim INTEGER NOT NULL,
+    blob BLOB NOT NULL,
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE INDEX IF NOT EXISTS idx_triples_subject ON triples(subject);
 CREATE INDEX IF NOT EXISTS idx_triples_object ON triples(object);
 CREATE INDEX IF NOT EXISTS idx_triples_valid ON triples(valid_from, valid_to);

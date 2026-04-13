@@ -9,9 +9,12 @@ import (
 	"strings"
 	"time"
 
+	"sync"
+
 	"github.com/snow-ghost/mem/internal/config"
 	"github.com/snow-ghost/mem/internal/embeddings"
 	"github.com/snow-ghost/mem/internal/palace"
+	"github.com/snow-ghost/mem/internal/rerank"
 	"github.com/snow-ghost/mem/internal/search"
 )
 
@@ -62,11 +65,34 @@ func main() {
 		os.Exit(1)
 	}
 
+	useRerank := os.Getenv("LOCOMO_RERANK") == "1"
+	if useRerank && !envCfg.RerankEnabled() {
+		fmt.Fprintln(os.Stderr, "LOCOMO_RERANK=1 requires MEM_RERANK_URL and MEM_RERANK_MODEL")
+		os.Exit(1)
+	}
+	rerankPool := 20
+	if v := os.Getenv("LOCOMO_RERANK_POOL"); v != "" {
+		fmt.Sscanf(v, "%d", &rerankPool)
+	}
+	rerankWorkers := 8
+	if v := os.Getenv("LOCOMO_RERANK_WORKERS"); v != "" {
+		fmt.Sscanf(v, "%d", &rerankWorkers)
+	}
+
+	useHNSW := os.Getenv("LOCOMO_HNSW") == "1"
+
 	fmt.Println("=== LoCoMo Benchmark for mem ===")
 	fmt.Printf("Dataset: %s\n", dataFile)
 	fmt.Printf("Mode: %s\n", mode)
 	if useEmbeddings {
 		fmt.Printf("Embeddings: %s\n", envCfg.EmbeddingsModel)
+	}
+	if useRerank {
+		fmt.Printf("Reranker: %s (LOCOMO_RERANK=1, pool=%d, workers=%d)\n",
+			envCfg.RerankModel, rerankPool, rerankWorkers)
+	}
+	if useHNSW {
+		fmt.Printf("HNSW: enabled (LOCOMO_HNSW=1)\n")
 	}
 	fmt.Println()
 
@@ -208,25 +234,89 @@ func main() {
 			}
 		}
 
-		// Run QAs
-		searchStart := time.Now()
-		for _, qa := range conv.QA {
-			if qa.Category == 5 {
-				adversarialTotal++
-				// For adversarial, we measure whether retrieval "avoids" or finds the trick.
-				// We still run the query and count based on evidence match.
-			}
-			totalQA++
+		// Optionally build HNSW index once per conv. Only used when
+		// mode=vector to swap out the per-query full-scan decode; in
+		// hybrid mode we still need BM25 alongside, so we keep the
+		// original SearchHybrid path (which decodes blobs once internally).
+		var hnswIdx *search.HNSWIndex
+		if useHNSW && useEmbeddings && mode == "vector" {
+			hnswIdx, _ = search.BuildHNSWFromPalace(d)
+		}
 
+		candidateLimit := 10
+		if useRerank {
+			candidateLimit = rerankPool
+		}
+
+		// Pre-fetch first-stage candidates for all QAs so we can rerank in parallel.
+		searchStart := time.Now()
+		candidates := make([][]search.SearchResult, len(conv.QA))
+		for i, qa := range conv.QA {
 			var results []search.SearchResult
 			qvec := queryVecs[qa.Question]
 			switch {
+			case mode == "vector" && hnswIdx != nil:
+				results, _ = search.SearchHNSW(d, hnswIdx, qvec, candidateLimit)
 			case mode == "vector" && qvec != nil:
-				results, _ = search.SearchVector(d, qvec, 0, 0, 10)
+				results, _ = search.SearchVector(d, qvec, 0, 0, candidateLimit)
 			case mode == "hybrid" && qvec != nil:
-				results, _ = search.SearchHybrid(d, qa.Question, qvec, 0, 0, 10)
+				results, _ = search.SearchHybrid(d, qa.Question, qvec, 0, 0, candidateLimit)
 			default:
-				results, _ = search.Search(d, qa.Question, 0, 0, 10)
+				results, _ = search.Search(d, qa.Question, 0, 0, candidateLimit)
+			}
+			candidates[i] = results
+		}
+
+		// Stage 2: cross-encoder re-rank in parallel (per-conv).
+		if useRerank {
+			rclient := rerank.NewClient(envCfg)
+			var wg sync.WaitGroup
+			jobs := make(chan int)
+			for w := 0; w < rerankWorkers; w++ {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					for i := range jobs {
+						results := candidates[i]
+						if len(results) <= 1 {
+							continue
+						}
+						docs := make([]string, len(results))
+						for j, r := range results {
+							docs[j] = r.Content
+							if len(docs[j]) > 1500 {
+								docs[j] = docs[j][:1500]
+							}
+						}
+						scores, err := rclient.Score(conv.QA[i].Question, docs)
+						if err != nil {
+							continue
+						}
+						for j := range results {
+							results[j].Score = scores[j]
+						}
+						sort.Slice(results, func(a, b int) bool {
+							return results[a].Score > results[b].Score
+						})
+						candidates[i] = results
+					}
+				}()
+			}
+			for i := range conv.QA {
+				jobs <- i
+			}
+			close(jobs)
+			wg.Wait()
+		}
+
+		for i, qa := range conv.QA {
+			if qa.Category == 5 {
+				adversarialTotal++
+			}
+			totalQA++
+			results := candidates[i]
+			if useRerank && len(results) > 10 {
+				results = results[:10]
 			}
 
 			evSet := make(map[string]bool)
