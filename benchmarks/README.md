@@ -221,6 +221,42 @@ correct session better than an abstract question form.
 
 Enable with `LME_QUERY2DOC_URL` + `LME_QUERY2DOC_MODEL`.
 
+##### Embedding model A/B: local vs cloud, LongMemEval vs LoCoMo
+
+Running the same pipeline across (a) BAAI/bge-m3 1024-d via cloud.ru
+and (b) sentence-transformers/all-MiniLM-L6-v2 384-d via local
+llama-server on port 8092.
+
+| | LongMemEval R@5 | LoCoMo R@5 | R@5 bench-delta |
+|---|---:|---:|---:|
+| bge-m3 (cloud) | **77.2%** | 88.6% | -11.4 |
+| MiniLM (local) | 72.4% | **88.8%** | -16.4 |
+| MemPalace reported | 96.6% | — | — |
+
+Two findings that surprised us:
+
+1) **bge-m3 beats MiniLM by 4.8 pp on LongMemEval but only ties on
+   LoCoMo.** The "better" model depends on the benchmark — there is
+   no free lunch. LoCoMo's session-level `dia_id` matching is more
+   forgiving and the smaller model keeps pace; LongMemEval's answer-
+   text presence is stricter and rewards the larger multilingual
+   embedding.
+
+2) **MiniLM here scores 72.4% R@5 but MemPalace reports 96.6%
+   with the same model family on the same benchmark.** Running the
+   exact ChromaDB reference model through our full L# Cache pipeline
+   does not close the gap — so the 96.6% number can't be purely
+   model-driven. Likely sources of divergence: their chunking/
+   indexing (whole conversation in a single ChromaDB item vs our
+   per-session drawers), their evaluation harness (how `containsAnswer`
+   is implemented), or the ChromaDB default similarity metric
+   (L2 vs our cosine).
+
+Local MiniLM was ~50× faster than cloud.ru bge-m3 on LongMemEval
+(2m22s vs 7m) and roughly 2× slower on LoCoMo (15m vs 6m, because
+LoCoMo's per-conversation loop gives less batching opportunity
+to a single local instance).
+
 ##### Embedding model A/B: bge-m3 vs Qwen3-Embedding-0.6B (both 1024-dim)
 
 Same L# Cache max-merge pipeline, just swap `MEM_EMBEDDINGS_MODEL`:
