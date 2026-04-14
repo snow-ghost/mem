@@ -288,6 +288,12 @@ three L# variants) + scoped palace + MiniLM drops R@5(sid) to
 multi-level isn't the gap either; our richer per-session indexing
 helps rather than hurts vs the simpler scheme MemPalace likely uses.
 
+Stacking Query2Doc on top of the scoped pipeline nudges further:
+MiniLM + L# max + Q2D (Qwen3-Next-80B via cloud.ru) + scoped lands
+at R@5(sid) = **79.2%**, up +4.2 pp from L# max + scoped alone. The
+gap to 96.6% shrinks to 17.4 pp but the four ruled-out hypotheses
+(model, metric, scope, indexing) still account for none of it.
+
 ##### Embedding model A/B: bge-m3 vs Qwen3-Embedding-0.6B (both 1024-dim)
 
 Same L# Cache max-merge pipeline, just swap `MEM_EMBEDDINGS_MODEL`:
