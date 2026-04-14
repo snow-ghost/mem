@@ -318,12 +318,31 @@ LME_LCACHE=1` + MiniLM via llama.cpp lands at:
 The single-session-assistant category matches exactly, confirming
 both runs hit the same oracle dataset. Temporal and preference
 diverge by 50–60 pp under identical retrieval — more than any
-embedding-model swap can explain. We conclude the 96.6% aggregate
-is either on a different split, computed against a different
-ground-truth mapping, or the result of a harness quirk we cannot
-discover from the public code. Five independent test vectors (model,
-metric, scope, indexing granularity, exact algorithm) now all
-converge on ~75–80% on oracle with MiniLM.
+embedding-model swap can explain. The reason: their `EphemeralClient`
+indexes only the current question's haystack (avg 1.9 sessions), so
+asking for top-50 trivially returns all of them and recall is
+guaranteed-100% on oracle. Re-running their actual code on oracle
+confirms it: every single question hits R@5 = 1.000. Their published
+"96.6%" is from a different split.
+
+##### Apples-to-apples on `longmemeval_s_cleaned` (~48 sessions/q)
+
+After tracking down the dataset they cite (`longmemeval_s_cleaned.json`,
+500 questions × ~48 haystack sessions each, ~24k total) and running
+**both** harnesses on it:
+
+| Run | Embedder | Time | R@5 (sid) |
+|---|---|---:|---:|
+| MemPalace own bench | ChromaDB MiniLM ONNX | 6m | **96.6%** |
+| Ours: L# max + scoped + Q2D | local MiniLM via llama.cpp | ~50m | 82.4% |
+
+**Their 96.6% is real on `_s_cleaned`** — fully reproduced. Real gap
+to our same-data run is **14.2 pp**, not the 22 pp implied by mixed
+datasets. Likely cause of the residual: our L# max merge picks the
+strongest of L0/L1/L2 per session, which lets a noisy L0 (full
+conversation incl. assistant) outrank the L1 (user-only) of the
+correct session within the same haystack. Their L1-only indexing
+sidesteps this.
 
 ##### Embedding model A/B: bge-m3 vs Qwen3-Embedding-0.6B (both 1024-dim)
 

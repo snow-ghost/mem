@@ -389,6 +389,9 @@ func main() {
 	if useRerank {
 		candidateLimit = rerankPool
 	}
+	if v := os.Getenv("LME_CANDIDATE_LIMIT"); v != "" {
+		fmt.Sscanf(v, "%d", &candidateLimit)
+	}
 
 	rerankWorkers := 8
 	if v := os.Getenv("LME_RERANK_WORKERS"); v != "" {
