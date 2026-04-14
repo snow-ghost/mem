@@ -281,6 +281,13 @@ comparing to other systems, ask which `containsAnswer` they used;
 (2) per-question palace scoping is free recall when the haystack is
 known, and worth wiring up if your application can compute it.
 
+A fourth test rules out the "indexing granularity" hypothesis:
+running with `LME_LCACHE=0` (one whole-session drawer instead of
+three L# variants) + scoped palace + MiniLM drops R@5(sid) to
+**65.6%** — *worse* than L# max + scoped (75.0%). So the L#
+multi-level isn't the gap either; our richer per-session indexing
+helps rather than hurts vs the simpler scheme MemPalace likely uses.
+
 ##### Embedding model A/B: bge-m3 vs Qwen3-Embedding-0.6B (both 1024-dim)
 
 Same L# Cache max-merge pipeline, just swap `MEM_EMBEDDINGS_MODEL`:
