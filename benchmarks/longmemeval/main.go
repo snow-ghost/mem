@@ -25,12 +25,14 @@ type Message struct {
 }
 
 type Question struct {
-	ID               string          `json:"question_id"`
-	Type             string          `json:"question_type"`
-	Question         string          `json:"question"`
-	Answer           any             `json:"answer"`
-	HaystackSessions [][]Message     `json:"haystack_sessions"`
-	AnswerSessionIDs json.RawMessage `json:"answer_session_ids"`
+	ID                 string          `json:"question_id"`
+	Type               string          `json:"question_type"`
+	Question           string          `json:"question"`
+	Answer             any             `json:"answer"`
+	HaystackSessions   [][]Message     `json:"haystack_sessions"`
+	HaystackSessionIDs []string        `json:"haystack_session_ids"`
+	AnswerSessionIDs   []string        `json:"answer_session_ids"`
+	RawAnswerSessIDs   json.RawMessage `json:"-"`
 }
 
 func main() {
@@ -151,9 +153,15 @@ func main() {
 	lcacheSessions := make(map[string]*sessionVariants)
 
 	for _, q := range questions {
-		for _, session := range q.HaystackSessions {
+		for si, session := range q.HaystackSessions {
 			totalSessions++
 			sessionID := fmt.Sprintf("session_%d", totalSessions)
+			// Prefer the dataset's canonical session ID when present, so
+			// we can evaluate via answer_session_ids (LongMemEval official
+			// metric) alongside the answer-text containment check.
+			if si < len(q.HaystackSessionIDs) && q.HaystackSessionIDs[si] != "" {
+				sessionID = q.HaystackSessionIDs[si]
+			}
 
 			if useLCache {
 				l0, l1, l2 := makeSessionVariants(session)
@@ -357,10 +365,11 @@ func main() {
 	}
 
 	type weightResult struct {
-		weight                  float64
-		hit1, hit5, hit10       int
-		searchDuration          time.Duration
-		typeHits                map[string][2]int
+		weight                     float64
+		hit1, hit5, hit10          int
+		sidHit1, sidHit5, sidHit10 int // session-id-based (LongMemEval official)
+		searchDuration             time.Duration
+		typeHits                   map[string][2]int
 	}
 	var sweep []weightResult
 	total := len(questions)
@@ -521,12 +530,18 @@ func main() {
 			}
 		}
 
-		// Tally hits
+		// Tally hits — two metrics side by side:
+		//   hit*    : containsAnswer(content, answer) — our original heuristic
+		//   sidHit* : session_id ∈ answer_session_ids — LongMemEval's official metric
 		for i, q := range questions {
 			answerText := normalizeAnswer(q.Answer)
 			results := perQResults[i]
 			if useRerank && len(results) > 10 {
 				results = results[:10]
+			}
+			answerSet := make(map[string]bool, len(q.AnswerSessionIDs))
+			for _, sid := range q.AnswerSessionIDs {
+				answerSet[sid] = true
 			}
 
 			found5, found10 := false, false
@@ -544,11 +559,32 @@ func main() {
 					break
 				}
 			}
+			sidFound5, sidFound10 := false, false
+			for i, r := range results {
+				if answerSet[r.SourceFile] {
+					if i == 0 {
+						wr.sidHit1++
+					}
+					if i < 5 {
+						sidFound5 = true
+					}
+					if i < 10 {
+						sidFound10 = true
+					}
+					break
+				}
+			}
 			if found5 {
 				wr.hit5++
 			}
 			if found10 {
 				wr.hit10++
+			}
+			if sidFound5 {
+				wr.sidHit5++
+			}
+			if sidFound10 {
+				wr.sidHit10++
 			}
 			counts := wr.typeHits[q.Type]
 			if found5 {
@@ -738,9 +774,12 @@ func main() {
 	if mode == "hybrid" {
 		fmt.Printf("BM25 weight: %.2f (vector weight: %.2f)\n", best.weight, 1-best.weight)
 	}
-	fmt.Printf("Recall@1:  %.1f%% (%d/%d)\n", float64(hit1)/float64(total)*100, hit1, total)
+	fmt.Printf("Recall@1:  %.1f%% (%d/%d)   [answer-text heuristic]\n", float64(hit1)/float64(total)*100, hit1, total)
 	fmt.Printf("Recall@5:  %.1f%% (%d/%d)\n", float64(hit5)/float64(total)*100, hit5, total)
 	fmt.Printf("Recall@10: %.1f%% (%d/%d)\n", float64(hit10)/float64(total)*100, hit10, total)
+	fmt.Printf("Recall@1 (sid):  %.1f%% (%d/%d)   [session_id — LongMemEval official]\n", float64(best.sidHit1)/float64(total)*100, best.sidHit1, total)
+	fmt.Printf("Recall@5 (sid):  %.1f%% (%d/%d)\n", float64(best.sidHit5)/float64(total)*100, best.sidHit5, total)
+	fmt.Printf("Recall@10 (sid): %.1f%% (%d/%d)\n", float64(best.sidHit10)/float64(total)*100, best.sidHit10, total)
 	fmt.Printf("Search time: %s (avg: %s/query)\n", searchDuration.Round(time.Millisecond), (searchDuration / time.Duration(total)).Round(time.Microsecond))
 
 	fmt.Printf("\n=== PER TYPE ===\n")
