@@ -294,6 +294,37 @@ at R@5(sid) = **79.2%**, up +4.2 pp from L# max + scoped alone. The
 gap to 96.6% shrinks to 17.4 pp but the four ruled-out hypotheses
 (model, metric, scope, indexing) still account for none of it.
 
+##### Faithful reimplementation of MemPalace's own algorithm
+
+Reading `mempalace/benchmarks/longmemeval_bench.py` revealed the
+exact setup: one document per session, built by joining *only* the
+user turns (`user_turns = [t["content"] for t in session if
+t["role"] == "user"]`), indexed into a per-question ephemeral
+ChromaDB with default embeddings (all-MiniLM-L6-v2, 384-d). This is
+the same recipe as our L1 variant with scoped palace.
+
+Running our bench with `LME_LCACHE_WEIGHTS=0,1,0 LME_SCOPED_PALACE=1
+LME_LCACHE=1` + MiniLM via llama.cpp lands at:
+
+| Metric | Our L1-only + scoped | MemPalace claim |
+|---|---:|---:|
+| R@5 (sid) | **74.6%** | 96.6% |
+| single-session-assistant R@5 | **92.9%** | 92.9% |
+| single-session-preference R@5 | 30.0% | 93.3% |
+| temporal-reasoning R@5 | 40.6% | 96.2% |
+| multi-session R@5 | 42.1% | — |
+| knowledge-update R@5 | 73.1% | — |
+
+The single-session-assistant category matches exactly, confirming
+both runs hit the same oracle dataset. Temporal and preference
+diverge by 50–60 pp under identical retrieval — more than any
+embedding-model swap can explain. We conclude the 96.6% aggregate
+is either on a different split, computed against a different
+ground-truth mapping, or the result of a harness quirk we cannot
+discover from the public code. Five independent test vectors (model,
+metric, scope, indexing granularity, exact algorithm) now all
+converge on ~75–80% on oracle with MiniLM.
+
 ##### Embedding model A/B: bge-m3 vs Qwen3-Embedding-0.6B (both 1024-dim)
 
 Same L# Cache max-merge pipeline, just swap `MEM_EMBEDDINGS_MODEL`:
