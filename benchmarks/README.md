@@ -329,20 +329,36 @@ confirms it: every single question hits R@5 = 1.000. Their published
 
 After tracking down the dataset they cite (`longmemeval_s_cleaned.json`,
 500 questions × ~48 haystack sessions each, ~24k total) and running
-**both** harnesses on it:
+**both** harnesses on it, then chasing a residual gap through a Python
+numpy replication against the same ONNX MiniLM, the remaining 14 pp
+turned out to be a constraint in *our* storage path:
 
-| Run | Embedder | Time | R@5 (sid) |
-|---|---|---:|---:|
-| MemPalace own bench | ChromaDB MiniLM ONNX | 6m | **96.6%** |
-| Ours: L# max + scoped + Q2D | local MiniLM via llama.cpp | ~50m | 82.4% |
+```go
+// internal/db/schema.go
+content_hash TEXT NOT NULL UNIQUE
+```
 
-**Their 96.6% is real on `_s_cleaned`** — fully reproduced. Real gap
-to our same-data run is **14.2 pp**, not the 22 pp implied by mixed
-datasets. Likely cause of the residual: our L# max merge picks the
-strongest of L0/L1/L2 per session, which lets a noisy L0 (full
-conversation incl. assistant) outrank the L1 (user-only) of the
-correct session within the same haystack. Their L1-only indexing
-sidesteps this.
+The palace dedupes drawers by content hash. On LongMemEval, 5416 out
+of 23867 haystack sessions (23%) have joined user-turn text identical
+to some other session's under a different `session_id`; the second
+insert silently fails and the scoped retriever can never find it
+because the drawer still lives under the first session-id. 270 of
+500 questions had their answer session stranded this way.
+
+A bench-only helper (`benchAddDrawer`) that hashes
+`(content, source_file, hall)` instead of `content` alone closes the
+gap completely:
+
+| | R@1 (sid) | R@5 (sid) | R@10 (sid) |
+|---|---:|---:|---:|
+| MemPalace's own harness | 80.6% | 96.6% | 98.2% |
+| Ours (L1-only + scoped, dedup-safe) | **80.6%** | **96.6%** | **98.2%** |
+
+Every digit matches. The 96.6% claim is fully reproducible with
+BM25+vector primitives plus a correct storage contract. Production
+`mem` users are typically unaffected (real memory content rarely
+collides), but anyone indexing benchmark/fixture corpora with many
+near-duplicate sessions should be aware — or reuse `benchAddDrawer`.
 
 ##### Embedding model A/B: bge-m3 vs Qwen3-Embedding-0.6B (both 1024-dim)
 

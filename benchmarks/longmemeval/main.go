@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -18,6 +19,33 @@ import (
 	"github.com/snow-ghost/mem/internal/rerank"
 	"github.com/snow-ghost/mem/internal/search"
 )
+
+// benchAddDrawer inserts a drawer bypassing the palace.AddDrawer dedup path.
+// The production content_hash UNIQUE constraint drops any session whose
+// joined user-turn text coincides with another session elsewhere in the
+// palace — on longmemeval_s_cleaned this loses ~23% of sessions and
+// strands 270/500 answer sessions behind a foreign session-id. The hash
+// below includes (sourceFile, hall) so cross-session collisions coexist.
+func benchAddDrawer(d *db.DB, content string, wingID, roomID int64, hall, sourceFile, sourceType string) (int64, error) {
+	if hall == "" {
+		hall = "facts"
+	}
+	if sourceType == "" {
+		sourceType = "file"
+	}
+	sum := sha256.Sum256([]byte(content + "\x00" + sourceFile + "\x00" + hall))
+	hash := fmt.Sprintf("%x", sum[:])
+	res, err := d.Exec(
+		`INSERT INTO drawers (content, content_hash, wing_id, room_id, hall, source_file, source_type)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		content, hash, wingID, roomID, hall, sourceFile, sourceType,
+	)
+	if err != nil {
+		return 0, err
+	}
+	id, _ := res.LastInsertId()
+	return id, nil
+}
 
 type Message struct {
 	Role    string `json:"role"`
@@ -167,18 +195,24 @@ func main() {
 				l0, l1, l2 := makeSessionVariants(session)
 				sv := &sessionVariants{sessionID: sessionID, l0: l0, l1: l1, l2: l2}
 				lcacheSessions[sessionID] = sv
-				for _, v := range []struct{ hall, content string }{
-					{"L0", l0}, {"L1", l1}, {"L2", l2},
+				for _, v := range []struct {
+					hall, content string
+					weight        float64
+				}{
+					{"L0", l0, lcacheW0}, {"L1", l1, lcacheW1}, {"L2", l2, lcacheW2},
 				} {
 					if len(v.content) < 5 {
 						continue
 					}
+					if lcacheMerge != "max" && v.weight == 0 {
+						continue
+					}
 					roomName := detectRoom(v.content)
 					room, _ := palace.CreateRoom(d, roomName, wing.ID)
-					drawer, _ := palace.AddDrawer(d, v.content, wing.ID, room.ID, v.hall, sessionID, "conversation")
-					if drawer != nil {
+					id, err := benchAddDrawer(d, v.content, wing.ID, room.ID, v.hall, sessionID, "conversation")
+					if err == nil {
 						totalDrawers++
-						batchItems = append(batchItems, struct{ ID int64; Content string }{drawer.ID, v.content})
+						batchItems = append(batchItems, struct{ ID int64; Content string }{id, v.content})
 					}
 				}
 				continue
@@ -192,10 +226,10 @@ func main() {
 				}
 				roomName := detectRoom(chunk)
 				room, _ := palace.CreateRoom(d, roomName, wing.ID)
-				drawer, _ := palace.AddDrawer(d, chunk, wing.ID, room.ID, "facts", sessionID, "conversation")
-				if drawer != nil {
+				id, err := benchAddDrawer(d, chunk, wing.ID, room.ID, "facts", sessionID, "conversation")
+				if err == nil {
 					totalDrawers++
-					batchItems = append(batchItems, struct{ ID int64; Content string }{drawer.ID, chunk})
+					batchItems = append(batchItems, struct{ ID int64; Content string }{id, chunk})
 				}
 			}
 		}
@@ -452,13 +486,21 @@ func main() {
 
 		// Per-query results, then optionally reranked in parallel.
 		perQResults := make([][]search.SearchResult, len(questions))
+		scopedPalacePre := os.Getenv("LME_SCOPED_PALACE") == "1"
 		for i, q := range questions {
 			var results []search.SearchResult
 			qvec := queryVecs[q.ID]
+			var haystackFilter map[string]bool
+			if scopedPalacePre {
+				haystackFilter = make(map[string]bool, len(q.HaystackSessionIDs))
+				for _, sid := range q.HaystackSessionIDs {
+					haystackFilter[sid] = true
+				}
+			}
 			switch {
 			case useLCache && qvec != nil:
 				results = lcacheSearch(d, qvec, lcacheSessions, candidateLimit,
-					lcacheW0, lcacheW1, lcacheW2, lcacheMerge)
+					lcacheW0, lcacheW1, lcacheW2, lcacheMerge, haystackFilter)
 				if lcacheBM25 > 0 {
 					results = lcacheBlendWithBM25(d, q.Question, results, lcacheBM25, candidateLimit)
 				}
@@ -863,7 +905,7 @@ func normalizeAnswer(answer any) string {
 // Content — evidence matching stays on the complete session, not on
 // whichever variant "won" the cosine.
 func lcacheSearch(d *db.DB, qvec []float32, lcacheSessionsByID map[string]*sessionVariants,
-	limit int, wL0, wL1, wL2 float64, mergeMode string) []search.SearchResult {
+	limit int, wL0, wL1, wL2 float64, mergeMode string, haystackFilter map[string]bool) []search.SearchResult {
 	rows, err := d.Query(`SELECT source_file, hall, embedding FROM drawers WHERE embedding IS NOT NULL`)
 	if err != nil {
 		return nil
@@ -875,6 +917,9 @@ func lcacheSearch(d *db.DB, qvec []float32, lcacheSessionsByID map[string]*sessi
 		var sessionID, hall string
 		var blob []byte
 		if err := rows.Scan(&sessionID, &hall, &blob); err != nil {
+			continue
+		}
+		if haystackFilter != nil && !haystackFilter[sessionID] {
 			continue
 		}
 		vec, err := embeddings.Decode(blob)
