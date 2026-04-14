@@ -257,6 +257,30 @@ Local MiniLM was ~50× faster than cloud.ru bge-m3 on LongMemEval
 LoCoMo's per-conversation loop gives less batching opportunity
 to a single local instance).
 
+##### Chasing the MemPalace 96.6% gap — three orthogonal tests
+
+To understand the 18.8 pp gap to MemPalace's reported 96.6% R@5, we
+isolated three plausible explanations and tested each:
+
+| Hypothesis | Change | R@5 result | Closes gap? |
+|---|---|---:|---|
+| **Embedding model** | swap bge-m3 → all-MiniLM-L6-v2 (their model) | 72.4% (heur) | No — 24.2 pp left |
+| **Eval metric** | switch heuristic `containsAnswer` → official `session_id` | 67.4% (sid) | No — sid is **stricter**, not lenient |
+| **Palace scope** | restrict retrieval to question's `haystack_session_ids` (`LME_SCOPED_PALACE=1`) | 75.0% (sid) | Partial — +7.6 pp |
+
+Even with all three favorable factors stacked (their model + their
+metric + per-question palace scope), our best is **75.0% R@5 (sid)** —
+still 21.6 pp below the 96.6% claim. The remaining gap is not
+explained by anything we can vary on our side; the most likely
+sources are ChromaDB-specific indexing details (chunk granularity,
+default similarity function) or differences in the reference harness
+itself.
+
+Two takeaways for our own users: (1) the metric matters — when
+comparing to other systems, ask which `containsAnswer` they used;
+(2) per-question palace scoping is free recall when the haystack is
+known, and worth wiring up if your application can compute it.
+
 ##### Embedding model A/B: bge-m3 vs Qwen3-Embedding-0.6B (both 1024-dim)
 
 Same L# Cache max-merge pipeline, just swap `MEM_EMBEDDINGS_MODEL`:

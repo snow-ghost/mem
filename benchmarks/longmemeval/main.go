@@ -533,6 +533,11 @@ func main() {
 		// Tally hits — two metrics side by side:
 		//   hit*    : containsAnswer(content, answer) — our original heuristic
 		//   sidHit* : session_id ∈ answer_session_ids — LongMemEval's official metric
+		//
+		// LME_SCOPED_PALACE=1 simulates per-question palace isolation by
+		// filtering results to this question's haystack before the top-K
+		// cut (needs candidateLimit large enough; use pool ≥ 50).
+		scopedPalace := os.Getenv("LME_SCOPED_PALACE") == "1"
 		for i, q := range questions {
 			answerText := normalizeAnswer(q.Answer)
 			results := perQResults[i]
@@ -542,6 +547,22 @@ func main() {
 			answerSet := make(map[string]bool, len(q.AnswerSessionIDs))
 			for _, sid := range q.AnswerSessionIDs {
 				answerSet[sid] = true
+			}
+			if scopedPalace {
+				haystack := make(map[string]bool, len(q.HaystackSessionIDs))
+				for _, sid := range q.HaystackSessionIDs {
+					haystack[sid] = true
+				}
+				filtered := make([]search.SearchResult, 0, len(results))
+				for _, r := range results {
+					if haystack[r.SourceFile] {
+						filtered = append(filtered, r)
+					}
+				}
+				results = filtered
+				if len(results) > 10 {
+					results = results[:10]
+				}
 			}
 
 			found5, found10 := false, false
