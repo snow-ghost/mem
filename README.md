@@ -255,19 +255,29 @@ for reproduction steps.
 
 ### LongMemEval (ICLR 2025) — 500 questions, 6 question types
 
-| Metric | BM25 + stemming | Hybrid (RRF 0.7) | Hybrid + rerank |
-|---|---:|---:|---:|
-| **Recall@1** | 44.4% | 48.0% | **52.6%** |
-| **Recall@5** | 71.0% | **74.6%** | 74.6% |
-| **Recall@10** | 77.2% | 79.2% | **80.8%** |
-| Avg query latency | 8.6 ms | 67 ms | 137 ms |
+On `longmemeval_oracle.json`. Two metrics: the answer-text heuristic
+(does any top-k result contain the answer string?) and the official
+session-id metric (is any top-k session in `answer_session_ids`?).
 
-Tokenizer applies Porter step 1a/1b stemming — `+1.6 R@5` on BM25 alone
-without any external dependency. Hybrid mode adds another `+3.6 R@5` via
-weighted Reciprocal Rank Fusion (0.7 BM25 / 0.3 vector). Cross-encoder
-reranking (`BAAI/bge-reranker-v2-m3`) on top of hybrid adds **+4.6 R@1**
-and **+1.6 R@10** — useful for top-1-driven workflows like LLM
-retrieval-augmented answering.
+| Config | R@1 (heur / sid) | R@5 (heur / sid) | R@10 (heur / sid) |
+|---|---:|---:|---:|
+| BM25 + stemming (local) | 44.0 / 31.6 | 70.4 / 62.0 | 76.8 / 74.6 |
+| Hybrid RRF 0.7 (MiniLM local via llama.cpp) | 47.2 / 37.0 | 72.0 / 65.2 | 79.4 / 76.8 |
+| Hybrid RRF 0.7 (bge-m3 cloud, historical) | 48.0 / — | 74.6 / — | 79.2 / — |
+| Hybrid + rerank bge-reranker-v2-m3 (cloud) | 52.6 / — | 74.6 / — | 80.8 / — |
+
+Tokenizer applies Porter step 1a/1b stemming (+1.6 R@5 on BM25 alone,
+no external dependency). Hybrid adds weighted Reciprocal Rank Fusion
+(0.7 BM25 / 0.3 vector). Cross-encoder rerank (`BAAI/bge-reranker-v2-m3`)
+adds +4.6 R@1 for top-1-driven workflows.
+
+BM25 and MiniLM-hybrid numbers above are from the current code on the
+local stack. The bge-m3 cloud rows are kept for reference — they
+require an external embeddings/rerank endpoint. See
+[`benchmarks/README.md`](benchmarks/README.md) for the full sweep,
+including L# Cache (R@5 77.2%), Query2Doc (R@5 77.8%), and the
+reproduction that closes the gap to MemPalace's 96.6% on
+`longmemeval_s_cleaned`.
 
 ### LoCoMo (Snap Research) — 10 long-form conversations, 1986 QAs
 
