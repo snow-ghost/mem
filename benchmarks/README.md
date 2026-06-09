@@ -358,7 +358,17 @@ Every digit matches. The 96.6% claim is fully reproducible with
 BM25+vector primitives plus a correct storage contract. Production
 `mem` users are typically unaffected (real memory content rarely
 collides), but anyone indexing benchmark/fixture corpora with many
-near-duplicate sessions should be aware — or reuse `benchAddDrawer`.
+near-duplicate sessions should be aware.
+
+Update 2026-06-10: the storage fix is now in core —
+`palace.ContentHash` hashes `(content, source_file, hall)` and the
+bench's `benchAddDrawer` is a thin wrapper over `palace.AddDrawer`.
+Re-running the parity config with the quantized local embedder
+(MiniLM **Q8_0 GGUF** via llama.cpp instead of the ONNX fp32
+reference) lands at R@1/R@5/R@10 (sid) = 79.6 / 95.6 / **98.2** —
+R@10 matches the reference exactly; the −1.0 pp on R@5 is embedder
+quantization, not pipeline drift (drawer dedup count identical:
+23765 of 23867 sessions).
 
 ##### Embedding model A/B: bge-m3 vs Qwen3-Embedding-0.6B (both 1024-dim)
 
@@ -557,13 +567,19 @@ go build -o /tmp/locomo-bench ./benchmarks/locomo/
 
 | Metric | BM25 | Hybrid (bge-m3 + RRF) |
 |---|---:|---:|
-| Recall@1 | **60.0%** | 59.0% |
-| **Recall@5** | 88.2% | **88.6%** |
-| Recall@10 | 93.7% | **95.6%** |
-| Non-adversarial R@5 | 86.8% | **87.5%** |
-| Index build | 6.2s | 6.2s + ~2 min embedding |
-| Avg query latency | 1.7ms | 4.5ms |
-| **Full run** | **~11s** | ~2m20s |
+| Recall@1 | **60.7%** | 59.0% |
+| **Recall@5** | 88.6% | 88.6% |
+| Recall@10 | 94.5% | **95.6%** |
+| Non-adversarial R@5 | 87.2% | **87.5%** |
+| Index build | 6.0s | 6.2s + ~2 min embedding |
+| Avg query latency | 1.4ms | 4.5ms |
+| **Full run** | **~10s** | ~2m20s |
+
+BM25 column re-verified 2026-06-09 after the `content_hash` dedup fix
+(hash now spans content + source + hall): 5882 messages indexed vs
+5880 before — two cross-session duplicate messages were previously
+silently dropped. R@1 +0.7, R@5 +0.4, R@10 +0.8 pp. The hybrid column
+is from the earlier bge-m3 cloud run and predates the fix.
 
 #### Per-category R@5: BM25 vs hybrid
 
@@ -580,6 +596,27 @@ high-volume categories (open-domain, adversarial), so hybrid's contribution
 is concentrated where it matters most: **multi-hop +7.3** (the hardest
 category) and **single-hop +5.7**. Recall@10 jumps from 93.7% to 95.6%,
 suggesting embeddings rescue evidence that fell out of the BM25 top-5.
+
+#### Recency boost on LoCoMo: large regression (don't)
+
+`LOCOMO_RECENCY=0.5` (same `search.ApplyRecencyBoost` that lifted
+ConvoMem changing_evidence strict R@1 by +73.5 pp) collapses LoCoMo
+R@5 from 88.6% → 55.7%; even 0.1 drops it to 69.5%. temporal — the
+category one might expect to benefit — falls 86.0 → 47.7. R@10 is
+untouched (the boost only reorders inside the candidate pool).
+
+Two reasons. First, the metric mismatch from the rerank finding
+applies just as much here: LoCoMo checks for a *specific* `dia_id`,
+and insertion order doesn't correlate with which chunk holds it.
+Second, LoCoMo temporal questions ask about *past events* ("when did
+Caroline go to the museum?"), not latest-value lookups — recency is
+the wrong prior. ConvoMem's changing_evidence is the opposite regime:
+every version of the fact matches lexically and the newest is
+canonical. **Rule of thumb:** recency boost pays off only when
+queries target the current value of a mutable fact; for episodic
+recall it actively destroys ranking. The per-palace scale matters
+too: with ~27 whole-session drawers, IDF flattens and BM25 score gaps
+inside top-10 are smaller than the boost bonus.
 
 #### Rerank on LoCoMo: large regression (metric-mismatch finding)
 
@@ -664,6 +701,9 @@ go build -o /tmp/convomem-bench ./benchmarks/convomem/
 - **Total runtime:** ~15 minutes (≈ 5m36s indexing + 9.5s searching)
 - **Avg query latency:** 1.4 ms
 
+Re-verified 2026-06-09 on current code (post `content_hash` fix):
+identical 100.0% across all context sizes and metrics, 7021 cases.
+
 ### Why 100%
 
 The ConvoMem paper's thesis is precisely that **BM25 alone suffices at small
@@ -721,4 +761,7 @@ output of `Search`, `SearchVector`, `SearchHybrid*`.
 
 - [ ] **ConvoMem at scale (50–300 convs)** — requires large batch downloads
 - [ ] **MemoryBench** (Supermemory) — unified runner for cross-provider comparison
-- [ ] **LongMemEval with recency boost** — does it help temporal-reasoning?
+- [x] **LoCoMo with recency boost** — answered 2026-06-10: large regression
+      at any weight (see "Recency boost on LoCoMo" above). The LongMemEval
+      temporal-reasoning category likely behaves the same way (event-time
+      questions, not latest-value), so that experiment is deprioritised.

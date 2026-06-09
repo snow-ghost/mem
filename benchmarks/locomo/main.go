@@ -81,6 +81,15 @@ func main() {
 
 	useHNSW := os.Getenv("LOCOMO_HNSW") == "1"
 
+	// LOCOMO_RECENCY=<float> applies search.ApplyRecencyBoost to first-stage
+	// results — mirrors CONVOMEM_RECENCY, where it lifted strict R@1 by
+	// +73.5 pp on changing_evidence. On LoCoMo the question is whether the
+	// temporal category benefits from favouring later messages.
+	recencyWeight := 0.0
+	if v := os.Getenv("LOCOMO_RECENCY"); v != "" {
+		fmt.Sscanf(v, "%f", &recencyWeight)
+	}
+
 	fmt.Println("=== LoCoMo Benchmark for mem ===")
 	fmt.Printf("Dataset: %s\n", dataFile)
 	fmt.Printf("Mode: %s\n", mode)
@@ -93,6 +102,9 @@ func main() {
 	}
 	if useHNSW {
 		fmt.Printf("HNSW: enabled (LOCOMO_HNSW=1)\n")
+	}
+	if recencyWeight > 0 {
+		fmt.Printf("Recency boost: %.2f (LOCOMO_RECENCY)\n", recencyWeight)
 	}
 	fmt.Println()
 
@@ -263,6 +275,9 @@ func main() {
 				results, _ = search.SearchHybrid(d, qa.Question, qvec, 0, 0, candidateLimit)
 			default:
 				results, _ = search.Search(d, qa.Question, 0, 0, candidateLimit)
+			}
+			if recencyWeight > 0 {
+				results = search.ApplyRecencyBoost(results, recencyWeight)
 			}
 			candidates[i] = results
 		}

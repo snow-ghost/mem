@@ -283,10 +283,14 @@ reproduction that closes the gap to MemPalace's 96.6% on
 
 | Metric | BM25 (offline) | Hybrid (BM25 + bge-m3) |
 |---|---:|---:|
-| Recall@1 | **60.0%** | 59.0% |
-| **Recall@5** | 88.2% | **88.6%** |
-| Recall@10 | 93.7% | **95.6%** |
-| Avg query latency | 1.7 ms | 4.5 ms |
+| Recall@1 | **60.7%** | 59.0% |
+| **Recall@5** | 88.6% | 88.6% |
+| Recall@10 | 94.5% | **95.6%** |
+| Avg query latency | 1.4 ms | 4.5 ms |
+
+BM25 numbers re-verified after the `content_hash` dedup fix (the hash
+now spans content + source + hall, so cross-session duplicate messages
+index correctly) — R@5 +0.4 pp over the previous run.
 
 Hybrid's win is concentrated where it matters most: **multi-hop +7.3 pp**
 (hardest category, 59.4 → 66.7) and **single-hop +5.7 pp** (80.5 → 86.2).
