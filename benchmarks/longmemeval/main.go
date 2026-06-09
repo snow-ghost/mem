@@ -1,7 +1,6 @@
 package main
 
 import (
-	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -20,31 +19,21 @@ import (
 	"github.com/snow-ghost/mem/internal/search"
 )
 
-// benchAddDrawer inserts a drawer bypassing the palace.AddDrawer dedup path.
-// The production content_hash UNIQUE constraint drops any session whose
-// joined user-turn text coincides with another session elsewhere in the
-// palace — on longmemeval_s_cleaned this loses ~23% of sessions and
-// strands 270/500 answer sessions behind a foreign session-id. The hash
-// below includes (sourceFile, hall) so cross-session collisions coexist.
+// benchAddDrawer is a thin wrapper around palace.AddDrawer kept for
+// historical compatibility. As of the `content_hash UNIQUE` relaxation
+// the production path already hashes `(content, source_file, hall)` so
+// cross-session collisions on LongMemEval's `_s_cleaned` no longer
+// strand answer sessions under a foreign id. The bench uses this wrapper
+// to return a plain (int64, error) tuple for the existing call sites.
 func benchAddDrawer(d *db.DB, content string, wingID, roomID int64, hall, sourceFile, sourceType string) (int64, error) {
-	if hall == "" {
-		hall = "facts"
-	}
-	if sourceType == "" {
-		sourceType = "file"
-	}
-	sum := sha256.Sum256([]byte(content + "\x00" + sourceFile + "\x00" + hall))
-	hash := fmt.Sprintf("%x", sum[:])
-	res, err := d.Exec(
-		`INSERT INTO drawers (content, content_hash, wing_id, room_id, hall, source_file, source_type)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		content, hash, wingID, roomID, hall, sourceFile, sourceType,
-	)
+	drawer, err := palace.AddDrawer(d, content, wingID, roomID, hall, sourceFile, sourceType)
 	if err != nil {
 		return 0, err
 	}
-	id, _ := res.LastInsertId()
-	return id, nil
+	if drawer == nil {
+		return 0, nil
+	}
+	return drawer.ID, nil
 }
 
 type Message struct {

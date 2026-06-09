@@ -87,7 +87,7 @@ func TestDrawer_GivenAdd_WhenRetrieved_ThenContentMatches(t *testing.T) {
 	}
 }
 
-func TestDrawer_GivenDuplicate_WhenAdded_ThenNilReturned(t *testing.T) {
+func TestDrawer_GivenSameContentSameSource_WhenAddedTwice_ThenDeduped(t *testing.T) {
 	d, _ := setupPalace(t)
 	defer d.Close()
 
@@ -95,14 +95,92 @@ func TestDrawer_GivenDuplicate_WhenAdded_ThenNilReturned(t *testing.T) {
 	r, _ := CreateRoom(d, "auth", w.ID)
 
 	AddDrawer(d, "same content", w.ID, r.ID, "facts", "a.go", "file")
-	dup, _ := AddDrawer(d, "same content", w.ID, r.ID, "facts", "b.go", "file")
+	dup, _ := AddDrawer(d, "same content", w.ID, r.ID, "facts", "a.go", "file")
 	if dup != nil {
-		t.Error("expected nil for duplicate, got drawer")
+		t.Error("expected nil for same (content, source, hall) duplicate, got drawer")
 	}
 
 	count, _ := CountDrawers(d)
 	if count != 1 {
 		t.Errorf("expected 1 drawer, got %d", count)
+	}
+}
+
+func TestDrawer_GivenSameContentDifferentSource_WhenAdded_ThenBothStored(t *testing.T) {
+	d, _ := setupPalace(t)
+	defer d.Close()
+
+	w, _ := CreateWing(d, "app", "project", "")
+	r, _ := CreateRoom(d, "auth", w.ID)
+
+	first, _ := AddDrawer(d, "same content", w.ID, r.ID, "facts", "a.go", "file")
+	second, err := AddDrawer(d, "same content", w.ID, r.ID, "facts", "b.go", "file")
+	if err != nil {
+		t.Fatalf("add drawer: %v", err)
+	}
+	if first == nil || second == nil {
+		t.Fatal("expected both drawers stored, got nil")
+	}
+	if first.ID == second.ID {
+		t.Errorf("expected distinct drawer IDs, got %d/%d", first.ID, second.ID)
+	}
+
+	count, _ := CountDrawers(d)
+	if count != 2 {
+		t.Errorf("expected 2 drawers, got %d", count)
+	}
+}
+
+func TestAddDrawerVariants_GivenThreeViews_WhenAdded_ThenEachHallStored(t *testing.T) {
+	d, _ := setupPalace(t)
+	defer d.Close()
+
+	w, _ := CreateWing(d, "app", "project", "")
+	r, _ := CreateRoom(d, "general", w.ID)
+
+	views := map[string]string{
+		"L0": "full session: user asks about auth, assistant explains oauth",
+		"L1": "asks about auth",
+		"L2": "asks about auth",
+	}
+	drawers, err := AddDrawerVariants(d, views, w.ID, r.ID, "session_42", "conversation")
+	if err != nil {
+		t.Fatalf("variants: %v", err)
+	}
+	for hall := range views {
+		if drawers[hall] == nil {
+			t.Errorf("expected drawer for hall %q, got nil", hall)
+		}
+	}
+
+	count, _ := CountDrawers(d)
+	// L1 and L2 have identical content+source+hall-L2 vs hall-L1 is different
+	// so we expect 3 distinct drawers (L0 distinct text, L1 and L2 same text
+	// but different hall → different hash).
+	if count != 3 {
+		t.Errorf("expected 3 drawers for 3 halls, got %d", count)
+	}
+}
+
+func TestDrawer_GivenSameContentDifferentHall_WhenAdded_ThenBothStored(t *testing.T) {
+	d, _ := setupPalace(t)
+	defer d.Close()
+
+	w, _ := CreateWing(d, "app", "project", "")
+	r, _ := CreateRoom(d, "auth", w.ID)
+
+	AddDrawer(d, "same content", w.ID, r.ID, "facts", "a.go", "file")
+	second, err := AddDrawer(d, "same content", w.ID, r.ID, "events", "a.go", "file")
+	if err != nil {
+		t.Fatalf("add drawer: %v", err)
+	}
+	if second == nil {
+		t.Fatal("expected drawer with different hall stored, got nil")
+	}
+
+	count, _ := CountDrawers(d)
+	if count != 2 {
+		t.Errorf("expected 2 drawers, got %d", count)
 	}
 }
 

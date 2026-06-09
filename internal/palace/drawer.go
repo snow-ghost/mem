@@ -18,8 +18,17 @@ type Drawer struct {
 	SourceType  string
 }
 
-func ContentHash(content string) string {
-	h := sha256.Sum256([]byte(content))
+// ContentHash derives the dedup key for a drawer.
+//
+// The hash spans (content, sourceFile, hall) — not content alone — so that
+// two drawers with identical text but different origin coexist. A content-
+// only hash collapses ~23% of LongMemEval's `_s_cleaned` sessions under
+// the same answer session-id; real `mem mine` users hit the same issue
+// when re-importing exports with duplicated chunks. The column-level
+// UNIQUE on content_hash stays correct under the new formula — same
+// (content, source, hall) still dedupes as before.
+func ContentHash(content, sourceFile, hall string) string {
+	h := sha256.Sum256([]byte(content + "\x00" + sourceFile + "\x00" + hall))
 	return fmt.Sprintf("%x", h)
 }
 
@@ -30,7 +39,7 @@ func AddDrawer(d *db.DB, content string, wingID, roomID int64, hall, sourceFile,
 	if sourceType == "" {
 		sourceType = "file"
 	}
-	hash := ContentHash(content)
+	hash := ContentHash(content, sourceFile, hall)
 
 	res, err := d.Exec(
 		`INSERT OR IGNORE INTO drawers (content, content_hash, wing_id, room_id, hall, source_file, source_type)
@@ -52,6 +61,34 @@ func AddDrawer(d *db.DB, content string, wingID, roomID int64, hall, sourceFile,
 		WingID: wingID, RoomID: roomID, Hall: hall,
 		SourceFile: sourceFile, SourceType: sourceType,
 	}, nil
+}
+
+// AddDrawerVariants stores several hall-tagged projections of the same
+// logical item under one source_file. It is the ingestion half of
+// Schift's "L# Cache" technique: pair with search.SearchByLCache to get
+// one result per source ranked by the best-matching variant.
+//
+// Typical use: for a chat session keyed by session_id, pass
+//
+//	{"L0": full, "L1": userTurnsOnly, "L2": firstThreeUserTurns}
+//
+// all three share source_file = session_id; content_hash includes hall
+// so the UNIQUE constraint does not collapse them. Variants that already
+// exist (same content, source, hall) are skipped and surface as nil.
+// A nil or empty views map is a no-op.
+func AddDrawerVariants(d *db.DB, views map[string]string, wingID, roomID int64, sourceFile, sourceType string) (map[string]*Drawer, error) {
+	if len(views) == 0 {
+		return nil, nil
+	}
+	out := make(map[string]*Drawer, len(views))
+	for hall, content := range views {
+		dr, err := AddDrawer(d, content, wingID, roomID, hall, sourceFile, sourceType)
+		if err != nil {
+			return out, fmt.Errorf("add variant %q: %w", hall, err)
+		}
+		out[hall] = dr
+	}
+	return out, nil
 }
 
 func GetDrawer(d *db.DB, id int64) (*Drawer, error) {

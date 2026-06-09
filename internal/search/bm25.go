@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"strconv"
+	"strings"
 
 	"github.com/snow-ghost/mem/internal/db"
 )
@@ -120,6 +121,12 @@ func IndexBatch(d *db.DB, items []struct{ ID int64; Content string }) error {
 }
 
 func Search(d *db.DB, query string, wingID, roomID int64, limit int) ([]SearchResult, error) {
+	return SearchScoped(d, query, wingID, roomID, Scope{}, limit)
+}
+
+// SearchScoped runs BM25 with an additional source_file filter. Used by
+// applications that want per-query palace isolation (see Scope).
+func SearchScoped(d *db.DB, query string, wingID, roomID int64, scope Scope, limit int) ([]SearchResult, error) {
 	if limit <= 0 {
 		limit = 5
 	}
@@ -157,6 +164,9 @@ func Search(d *db.DB, query string, wingID, roomID int64, limit int) ([]SearchRe
 			idf = 0
 		}
 
+		// Scope.appendFilter expects the drawers alias `d`; BM25's local
+		// alias here is `dr`, so we inline the IN-clause with the same
+		// placeholder rendering.
 		filterQuery := "SELECT si.drawer_id, si.tf FROM search_index si JOIN drawers dr ON si.drawer_id = dr.id WHERE si.term_id = ?"
 		var args []any
 		args = append(args, termID)
@@ -167,6 +177,14 @@ func Search(d *db.DB, query string, wingID, roomID int64, limit int) ([]SearchRe
 		if roomID > 0 {
 			filterQuery += " AND dr.room_id = ?"
 			args = append(args, roomID)
+		}
+		if !scope.IsEmpty() {
+			placeholders := make([]string, len(scope.SessionIDs))
+			for i, id := range scope.SessionIDs {
+				placeholders[i] = "?"
+				args = append(args, id)
+			}
+			filterQuery += " AND dr.source_file IN (" + strings.Join(placeholders, ",") + ")"
 		}
 
 		rows, err := d.Query(filterQuery, args...)

@@ -13,6 +13,12 @@ import (
 // This is a full scan — fine up to ~100k drawers on a modern CPU. For larger
 // palaces an ANN index (e.g., HNSW) would be needed.
 func SearchVector(d *db.DB, queryVec []float32, wingID, roomID int64, limit int) ([]SearchResult, error) {
+	return SearchVectorScoped(d, queryVec, wingID, roomID, Scope{}, limit)
+}
+
+// SearchVectorScoped runs cosine-similarity search with an optional
+// source_file filter (see Scope).
+func SearchVectorScoped(d *db.DB, queryVec []float32, wingID, roomID int64, scope Scope, limit int) ([]SearchResult, error) {
 	if limit <= 0 {
 		limit = 5
 	}
@@ -34,6 +40,11 @@ func SearchVector(d *db.DB, queryVec []float32, wingID, roomID int64, limit int)
 	if roomID > 0 {
 		query += " AND d.room_id = ?"
 		args = append(args, roomID)
+	}
+	if !scope.IsEmpty() {
+		frag, nargs := scope.appendFilter(args)
+		query += frag
+		args = nargs
 	}
 
 	rows, err := d.Query(query, args...)
@@ -70,6 +81,11 @@ func SearchVector(d *db.DB, queryVec []float32, wingID, roomID int64, limit int)
 // Equivalent to SearchHybridWeighted with bm25Weight=0.5.
 func SearchHybrid(d *db.DB, query string, queryVec []float32, wingID, roomID int64, limit int) ([]SearchResult, error) {
 	return SearchHybridWeighted(d, query, queryVec, wingID, roomID, limit, 0.5)
+}
+
+// SearchHybridScoped is SearchHybrid with a source_file filter.
+func SearchHybridScoped(d *db.DB, query string, queryVec []float32, wingID, roomID int64, scope Scope, limit int) ([]SearchResult, error) {
+	return SearchHybridWeightedScoped(d, query, queryVec, wingID, roomID, scope, limit, 0.5)
 }
 
 // DefaultPerTypeWeights is the LongMemEval-derived BM25 weight per
@@ -126,6 +142,11 @@ func ApplyRecencyBoost(results []SearchResult, recencyWeight float64) []SearchRe
 // weight (from DefaultPerTypeWeights or override), and runs weighted
 // RRF. Falls back to weight 0.7 if the predicted type isn't in the map.
 func SearchHybridAuto(d *db.DB, query string, queryVec []float32, wingID, roomID int64, limit int, weights map[QuestionType]float64) ([]SearchResult, error) {
+	return SearchHybridAutoScoped(d, query, queryVec, wingID, roomID, Scope{}, limit, weights)
+}
+
+// SearchHybridAutoScoped is SearchHybridAuto with a source_file filter.
+func SearchHybridAutoScoped(d *db.DB, query string, queryVec []float32, wingID, roomID int64, scope Scope, limit int, weights map[QuestionType]float64) ([]SearchResult, error) {
 	if weights == nil {
 		weights = DefaultPerTypeWeights
 	}
@@ -134,7 +155,7 @@ func SearchHybridAuto(d *db.DB, query string, queryVec []float32, wingID, roomID
 	if !ok {
 		w = 0.7
 	}
-	return SearchHybridWeighted(d, query, queryVec, wingID, roomID, limit, w)
+	return SearchHybridWeightedScoped(d, query, queryVec, wingID, roomID, scope, limit, w)
 }
 
 // SearchHybridWeighted is RRF with adjustable BM25 weight in [0, 1].
@@ -147,6 +168,12 @@ func SearchHybridAuto(d *db.DB, query string, queryVec []float32, wingID, roomID
 // Drawers missing from one system contribute 0 from that system. We widen the
 // per-system candidate pool to 4*limit to give RRF enough material to work with.
 func SearchHybridWeighted(d *db.DB, query string, queryVec []float32, wingID, roomID int64, limit int, bm25Weight float64) ([]SearchResult, error) {
+	return SearchHybridWeightedScoped(d, query, queryVec, wingID, roomID, Scope{}, limit, bm25Weight)
+}
+
+// SearchHybridWeightedScoped is SearchHybridWeighted with an additional
+// source_file filter (see Scope).
+func SearchHybridWeightedScoped(d *db.DB, query string, queryVec []float32, wingID, roomID int64, scope Scope, limit int, bm25Weight float64) ([]SearchResult, error) {
 	if limit <= 0 {
 		limit = 5
 	}
@@ -160,11 +187,11 @@ func SearchHybridWeighted(d *db.DB, query string, queryVec []float32, wingID, ro
 	const k = 60.0
 	vecWeight := 1.0 - bm25Weight
 
-	bm25Results, err := Search(d, query, wingID, roomID, pool)
+	bm25Results, err := SearchScoped(d, query, wingID, roomID, scope, pool)
 	if err != nil {
 		return nil, err
 	}
-	vecResults, err := SearchVector(d, queryVec, wingID, roomID, pool)
+	vecResults, err := SearchVectorScoped(d, queryVec, wingID, roomID, scope, pool)
 	if err != nil {
 		return nil, err
 	}

@@ -307,7 +307,7 @@ func runMine(args []string) int {
 }
 
 func runSearch(args []string) int {
-	var wingFlag, roomFlag, modeFlag string
+	var wingFlag, roomFlag, modeFlag, sessionIDsFlag string
 	var limitFlag int
 	var hnswFlag, perTypeFlag, query2docFlag bool
 	var recencyFlag float64
@@ -320,6 +320,9 @@ func runSearch(args []string) int {
 	fs.BoolVar(&perTypeFlag, "per-type", false, "in hybrid mode, classify the query and pick the per-type RRF weight")
 	fs.Float64Var(&recencyFlag, "recency", 0, "post-rank recency boost weight in [0..1] (favours newer drawers — useful for changing facts)")
 	fs.BoolVar(&query2docFlag, "query2doc", false, "Query2Doc/HyDE: LLM writes pseudo-answer, embed + average with query (requires MEM_LLM_*)")
+	fs.StringVar(&sessionIDsFlag, "session-ids", "", "comma-separated source_file values; restricts retrieval to matching drawers (MemPalace-style per-question scope)")
+	var lcacheFlag bool
+	fs.BoolVar(&lcacheFlag, "lcache", false, "L# Cache retrieval: collapse multi-variant drawers by source_file, max score per source (vector mode only)")
 	var palaceFlag string
 	fs.StringVar(&palaceFlag, "palace", "", "override palace path")
 	fs.Parse(args)
@@ -360,6 +363,8 @@ func runSearch(args []string) int {
 		roomID = r.ID
 	}
 
+	scope := search.Scope{SessionIDs: parseSessionIDs(sessionIDsFlag)}
+
 	var results []search.SearchResult
 	switch modeFlag {
 	case "vector", "hybrid":
@@ -392,6 +397,12 @@ func runSearch(args []string) int {
 		}
 		switch {
 		case hnswFlag && modeFlag == "vector":
+			if !scope.IsEmpty() {
+				// HNSW has no scope filter; a post-filter on top of
+				// top-k is lossy. Bail out with a clear message.
+				fmt.Fprintln(os.Stderr, "mem: search: --hnsw does not support --session-ids yet; drop one of the flags")
+				return 1
+			}
 			idx, ierr := search.LoadOrBuildHNSW(d, "default")
 			if ierr != nil || idx == nil {
 				fmt.Fprintln(os.Stderr, "mem: search: HNSW build failed, falling back to full scan")
@@ -399,19 +410,21 @@ func runSearch(args []string) int {
 			} else {
 				results, err = search.SearchHNSW(d, idx, qvec, limitFlag)
 			}
+		case lcacheFlag && modeFlag == "vector":
+			results, err = search.SearchByLCache(d, qvec, wingID, roomID, scope, limitFlag)
 		case modeFlag == "vector":
-			results, err = search.SearchVector(d, qvec, wingID, roomID, limitFlag)
+			results, err = search.SearchVectorScoped(d, qvec, wingID, roomID, scope, limitFlag)
 		case modeFlag == "hybrid" && perTypeFlag:
-			results, err = search.SearchHybridAuto(d, query, qvec, wingID, roomID, limitFlag, nil)
+			results, err = search.SearchHybridAutoScoped(d, query, qvec, wingID, roomID, scope, limitFlag, nil)
 		default:
-			results, err = search.SearchHybrid(d, query, qvec, wingID, roomID, limitFlag)
+			results, err = search.SearchHybridScoped(d, query, qvec, wingID, roomID, scope, limitFlag)
 		}
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "mem: search: %v\n", err)
 			return 1
 		}
 	default:
-		results, err = search.Search(d, query, wingID, roomID, limitFlag)
+		results, err = search.SearchScoped(d, query, wingID, roomID, scope, limitFlag)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "mem: search: %v\n", err)
 			return 1
@@ -439,6 +452,20 @@ func runSearch(args []string) int {
 		fmt.Printf("    %s\n\n", snippet)
 	}
 	return 0
+}
+
+func parseSessionIDs(raw string) []string {
+	if raw == "" {
+		return nil
+	}
+	var out []string
+	for _, part := range strings.Split(raw, ",") {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
 }
 
 func detectRoom(content string) string {

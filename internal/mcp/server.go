@@ -26,10 +26,11 @@ func NewServer(d *db.DB, cfg config.Config) *mcp.Server {
 		Name:        "mem_search",
 		Description: "Search memories in the palace. Mode: bm25 (default), vector, or hybrid (requires MEM_EMBEDDINGS_*).",
 		InputSchema: jsonSchema(map[string]any{
-			"query": map[string]any{"type": "string", "description": "search query"},
-			"wing":  map[string]any{"type": "string", "description": "filter by wing"},
-			"room":  map[string]any{"type": "string", "description": "filter by room"},
-			"mode":  map[string]any{"type": "string", "description": "bm25 | vector | hybrid (default bm25)"},
+			"query":       map[string]any{"type": "string", "description": "search query"},
+			"wing":        map[string]any{"type": "string", "description": "filter by wing"},
+			"room":        map[string]any{"type": "string", "description": "filter by room"},
+			"mode":        map[string]any{"type": "string", "description": "bm25 | vector | hybrid (default bm25)"},
+			"session_ids": map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "restrict retrieval to drawers whose source_file matches any id (MemPalace-style per-question scope)"},
 		}, []string{"query"}),
 	}, searchHandler(d, cfg))
 
@@ -122,6 +123,34 @@ func getArgs(req *mcp.CallToolRequest) map[string]string {
 	return result
 }
 
+// getStringSlice extracts a JSON array of strings from the request.
+// Returns nil if absent or if the field isn't an array. Non-string
+// elements are stringified via fmt.Sprintf, matching getArgs's coercion.
+func getStringSlice(req *mcp.CallToolRequest, key string) []string {
+	if req.Params.Arguments == nil {
+		return nil
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(req.Params.Arguments, &raw); err != nil {
+		return nil
+	}
+	arr, ok := raw[key].([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(arr))
+	for _, v := range arr {
+		s, ok := v.(string)
+		if !ok {
+			s = fmt.Sprintf("%v", v)
+		}
+		if s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
 func searchHandler(d *db.DB, cfg config.Config) mcp.ToolHandler {
 	return func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		a := getArgs(req)
@@ -136,6 +165,7 @@ func searchHandler(d *db.DB, cfg config.Config) mcp.ToolHandler {
 				roomID = r.ID
 			}
 		}
+		scope := search.Scope{SessionIDs: getStringSlice(req, "session_ids")}
 
 		mode := a["mode"]
 		var results []search.SearchResult
@@ -151,12 +181,12 @@ func searchHandler(d *db.DB, cfg config.Config) mcp.ToolHandler {
 				return textResult(fmt.Sprintf("Error embedding query: %v", embErr)), nil
 			}
 			if mode == "vector" {
-				results, err = search.SearchVector(d, qvec, wingID, roomID, 5)
+				results, err = search.SearchVectorScoped(d, qvec, wingID, roomID, scope, 5)
 			} else {
-				results, err = search.SearchHybrid(d, a["query"], qvec, wingID, roomID, 5)
+				results, err = search.SearchHybridScoped(d, a["query"], qvec, wingID, roomID, scope, 5)
 			}
 		default:
-			results, err = search.Search(d, a["query"], wingID, roomID, 5)
+			results, err = search.SearchScoped(d, a["query"], wingID, roomID, scope, 5)
 		}
 		if err != nil {
 			return textResult(fmt.Sprintf("Error: %v", err)), nil
